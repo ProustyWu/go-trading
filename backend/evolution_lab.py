@@ -3,7 +3,17 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .config import read_llm_provider, read_network_settings, read_prompt_settings, save_prompt_preset
+from .config import (
+    read_llm_provider,
+    read_network_settings,
+    read_prompt_preset,
+    read_prompt_settings,
+    save_prompt_preset,
+    write_prompt_settings,
+    write_trading_settings,
+)
+from .evolution_registry import attach_shadow_instance, family_for_instance
+from .instances import clone_instance, read_instance
 from .llm import generate_structured_json
 
 
@@ -159,4 +169,60 @@ def generate_candidate_prompt(
         "candidate": validated,
         "reviewId": str(review_report.get("id") or "").strip() or None,
         "llm": llm_result.get("provider") if isinstance(llm_result, dict) else None,
+    }
+
+
+def create_shadow_instance_from_candidate(
+    *,
+    active_instance_id: str,
+    family_id: str | None = None,
+    candidate_preset_id: str | None = None,
+    candidate_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    active_instance = read_instance(active_instance_id)
+    if active_instance["type"] != "paper":
+        raise ValueError("Shadow instances can only be cloned from a paper active instance.")
+
+    family = family_for_instance(active_instance_id)
+    target_family_id = str(family_id or (family.get("id") if isinstance(family, dict) else "")).strip() or None
+
+    preset: dict[str, Any]
+    if str(candidate_preset_id or "").strip():
+        preset = read_prompt_preset(str(candidate_preset_id).strip(), active_instance_id)
+    else:
+        if not isinstance(candidate_payload, dict):
+            raise ValueError("Candidate preset id or candidate payload is required.")
+        saved = persist_candidate_preset(active_instance_id, candidate_payload)
+        preset = saved["preset"]
+
+    shadow_name = f"{active_instance['name']} · SHADOW · {preset['name']}"
+    shadow_instance = clone_instance(active_instance_id, "paper", shadow_name)
+    shadow_instance_id = shadow_instance["id"]
+
+    # 明确将候选 preset 绑定为 shadow 当前策略，避免仅复制库但未切换激活 prompt。
+    write_prompt_settings(
+        {
+            "name": preset["name"],
+            "presetId": preset["id"],
+            "klineFeeds": preset["klineFeeds"],
+            "decision_logic": preset["decision_logic"],
+        },
+        shadow_instance_id,
+    )
+    write_trading_settings(
+        {
+            "mode": "paper",
+            "paperTrading": {"enabled": False},
+            "liveTrading": {"enabled": False},
+        },
+        shadow_instance_id,
+    )
+
+    if target_family_id:
+        attach_shadow_instance(target_family_id, shadow_instance_id)
+
+    return {
+        "instance": read_instance(shadow_instance_id),
+        "preset": preset,
+        "familyId": target_family_id,
     }
