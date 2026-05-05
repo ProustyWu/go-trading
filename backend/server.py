@@ -222,6 +222,8 @@ class AppRuntime:
             "lastFinishedAt": None,
             "lastError": None,
             "lastReason": None,
+            "lastDurationSeconds": None,
+            "lastResult": None,
         }
 
     def _scan_runner(self, instance_id: str) -> dict[str, Any]:
@@ -423,6 +425,7 @@ class AppRuntime:
                     **family,
                     "activeInstance": active_instance,
                     "shadowInstances": shadow_instances,
+                    "evolutionRunner": dict(self._evolution_runner(family_id)),
                     "latestFamilyReview": latest_family_review,
                     "latestActiveReview": latest_active_review,
                     "latestShadowReviews": latest_shadow_reviews,
@@ -441,6 +444,7 @@ class AppRuntime:
 
     def _run_scan_job(self, instance_id: str, reason: str) -> None:
         runner = self._scan_runner(instance_id)
+        started_ts = time.time()
         with self.lock:
             runner["running"] = True
             runner["lastStartedAt"] = now_iso()
@@ -461,11 +465,13 @@ class AppRuntime:
             with self.lock:
                 runner["running"] = False
                 runner["lastFinishedAt"] = now_iso()
+                runner["lastDurationSeconds"] = max(0.0, time.time() - started_ts)
 
     def _run_trade_job(self, instance_id: str, reason: str) -> None:
         instance = read_instance(instance_id)
         mode = instance["type"]
         runner = self._trade_runner(instance_id)
+        started_ts = time.time()
         with self.lock:
             runner["running"] = True
             runner["lastStartedAt"] = now_iso()
@@ -487,6 +493,7 @@ class AppRuntime:
             with self.lock:
                 runner["running"] = False
                 runner["lastFinishedAt"] = now_iso()
+                runner["lastDurationSeconds"] = max(0.0, time.time() - started_ts)
 
     def start_scan(self, instance_id: str, reason: str = "manual") -> bool:
         runner = self._scan_runner(instance_id)
@@ -508,6 +515,7 @@ class AppRuntime:
 
     def _run_evolution_job(self, family_id: str, reason: str) -> None:
         runner = self._evolution_runner(family_id)
+        started_ts = time.time()
         with self.lock:
             runner["running"] = True
             runner["lastStartedAt"] = now_iso()
@@ -519,6 +527,8 @@ class AppRuntime:
             family_review = result.get("familyReview") if isinstance(result.get("familyReview"), dict) else {}
             promotion = result.get("promotion") if isinstance(result.get("promotion"), dict) else None
             candidate = result.get("candidate") if isinstance(result.get("candidate"), dict) else None
+            with self.lock:
+                runner["lastResult"] = _evolution_result_summary(result)
             self.record_log(
                 "INFO",
                 f"Evolution cycle 完成，family={family_id}，score={family_review.get('finalScore', 'n/a')}，candidate={candidate.get('preset', {}).get('id', 'skip') if candidate else 'skip'}，promotion={promotion.get('toInstanceId', 'skip') if promotion else 'skip'}",
@@ -526,11 +536,13 @@ class AppRuntime:
         except Exception as error:
             with self.lock:
                 runner["lastError"] = str(error)
+                runner["lastResult"] = None
             self.record_log("ERROR", f"Evolution cycle 失败，family={family_id}：{error}")
         finally:
             with self.lock:
                 runner["running"] = False
                 runner["lastFinishedAt"] = now_iso()
+                runner["lastDurationSeconds"] = max(0.0, time.time() - started_ts)
 
     def start_evolution(self, family_id: str, reason: str = "manual") -> bool:
         runner = self._evolution_runner(family_id)
@@ -934,6 +946,34 @@ def run_family_evolution_cycle(family_id: str, *, reason: str = "manual") -> dic
     }
 
 
+def _evolution_result_summary(result: dict[str, Any]) -> dict[str, Any]:
+    family_review = result.get("familyReview") if isinstance(result.get("familyReview"), dict) else {}
+    active_review = result.get("activeReview") if isinstance(result.get("activeReview"), dict) else {}
+    candidate = result.get("candidate") if isinstance(result.get("candidate"), dict) else {}
+    shadow = result.get("shadow") if isinstance(result.get("shadow"), dict) else {}
+    promotion = result.get("promotion") if isinstance(result.get("promotion"), dict) else {}
+    sample = family_review.get("sample") if isinstance(family_review.get("sample"), dict) else {}
+    shadow_reviews = result.get("shadowReviews") if isinstance(result.get("shadowReviews"), list) else []
+
+    def _text(value: Any) -> str | None:
+        text = str(value or "").strip()
+        return text or None
+
+    return {
+        "familyReviewId": _text(family_review.get("id")),
+        "familyScore": num(family_review.get("finalScore")),
+        "activeReviewId": _text(active_review.get("id")),
+        "activeScore": num(active_review.get("finalScore")),
+        "insufficientSample": bool(family_review.get("insufficientSample")),
+        "decisions": int(num(sample.get("decisions")) or 0),
+        "closedTrades": int(num(sample.get("closedTrades")) or 0),
+        "shadowReviewCount": len([item for item in shadow_reviews if isinstance(item, dict)]),
+        "candidatePresetId": _text(candidate.get("preset", {}).get("id") if isinstance(candidate.get("preset"), dict) else None),
+        "shadowInstanceId": _text(shadow.get("instance", {}).get("id") if isinstance(shadow.get("instance"), dict) else None),
+        "promotionInstanceId": _text(promotion.get("toInstanceId")),
+    }
+
+
 class TradingAgentHandler(BaseHTTPRequestHandler):
     runtime: AppRuntime
 
@@ -1168,6 +1208,28 @@ class TradingAgentHandler(BaseHTTPRequestHandler):
             instance_id = _query_value(parsed, "instanceId")
             limit = int(num(_query_value(parsed, "limit")) or 50)
             return _json_response(self, {"reviews": _latest_reports(limit=limit, family_id=family_id, instance_id=instance_id)}) or True
+        if method == "POST" and path == "/api/evolution/cycle/start":
+            payload = _read_json_body(self)
+            family_id = str(payload.get("familyId") or "").strip()
+            if not family_id:
+                raise ValueError("familyId is required.")
+            reason = str(payload.get("reason") or "manual_cycle").strip() or "manual_cycle"
+            family = _family_by_id(family_id)
+            active_instance_id = str(family.get("activeInstanceId") or "").strip() or None
+            started = self.runtime.start_evolution(family_id, reason)
+            if started:
+                self.runtime.record_log("INFO", f"收到手动 evolution cycle 请求，family={family_id}，reason={reason}", active_instance_id)
+            else:
+                self.runtime.record_log("WARN", f"收到手动 evolution cycle 请求，但上一轮仍在执行，family={family_id}", active_instance_id)
+            return _json_response(
+                self,
+                {
+                    "started": started,
+                    "familyId": family_id,
+                    "evolutionRunner": self.runtime._evolution_runner(family_id),
+                    **self.runtime.evolution_families_payload(),
+                },
+            ) or True
         if method == "POST" and path == "/api/evolution/review/run":
             payload = _read_json_body(self)
             family_id = str(payload.get("familyId") or "").strip() or None

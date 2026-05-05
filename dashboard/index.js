@@ -69,6 +69,12 @@ function fmtDurationSeconds(value) {
   return `${minutes} 分 ${rest} 秒`;
 }
 
+function fmtOptionalDuration(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "n/a";
+  return fmtDurationSeconds(num);
+}
+
 function cooldownText(cooldown) {
   if (!cooldown || !cooldown.active) return "";
   const exchange = String(cooldown.exchange || "binance").toUpperCase();
@@ -224,11 +230,43 @@ function renderWorkbench() {
   }
 }
 
+function evolutionRunnerState(runner) {
+  if (runner?.running) return { label: "Cycle Running", className: "is-running" };
+  if (runner?.lastError) return { label: "Cycle Error", className: "is-error" };
+  if (runner?.lastFinishedAt) return { label: "Cycle Ready", className: "is-ready" };
+  return { label: "Cycle Idle", className: "is-idle" };
+}
+
+function describeEvolutionResult(runner) {
+  const result = runner?.lastResult;
+  if (!result) {
+    if (runner?.lastError) return "最近一轮已失败";
+    return runner?.lastFinishedAt ? "最近一轮未生成摘要" : "尚未执行过 cycle";
+  }
+  const pieces = [];
+  if (Number.isFinite(Number(result.familyScore))) pieces.push(`family ${fmtScore(result.familyScore)}`);
+  if (result.insufficientSample) pieces.push("样本不足");
+  if (result.candidatePresetId) pieces.push(`candidate ${result.candidatePresetId}`);
+  if (result.promotionInstanceId) pieces.push(`promote ${result.promotionInstanceId}`);
+  return pieces.join(" · ") || "最近一轮已完成";
+}
+
+function describeEvolutionRunnerMeta(runner) {
+  const pieces = [];
+  if (runner?.lastReason) pieces.push(`reason ${runner.lastReason}`);
+  if (runner?.lastStartedAt) pieces.push(`start ${fmtDateTime(runner.lastStartedAt)}`);
+  if (runner?.lastFinishedAt) pieces.push(`finish ${fmtDateTime(runner.lastFinishedAt)}`);
+  if (Number.isFinite(Number(runner?.lastDurationSeconds))) pieces.push(`耗时 ${fmtOptionalDuration(runner.lastDurationSeconds)}`);
+  return pieces.join(" · ") || "尚无运行记录";
+}
+
 function renderEvolution() {
   const families = state.evolution?.families || [];
   const promotableCount = families.filter((item) => item?.promotionPreview?.promotable).length;
+  const runningCount = families.filter((item) => item?.evolutionRunner?.running).length;
+  const errorCount = families.filter((item) => item?.evolutionRunner?.lastError).length;
   els.evolutionMeta.textContent = families.length
-    ? `共 ${families.length} 条 family，当前有 ${promotableCount} 条满足晋升门槛`
+    ? `共 ${families.length} 条 family，运行中 ${runningCount} 条，可晋升 ${promotableCount} 条，异常 ${errorCount} 条`
     : "还没有 strategy family，可先从某个 paper instance 建一条演化线。";
 
   els.familyGrid.innerHTML = families.map((family) => {
@@ -239,6 +277,9 @@ function renderEvolution() {
     const activeReview = family.latestActiveReview;
     const familyReview = family.latestFamilyReview;
     const shadows = family.shadowInstances || [];
+    const runner = family.evolutionRunner || {};
+    const runnerState = evolutionRunnerState(runner);
+    const isBusy = Boolean(runner.running);
     const promotableShadowId = preview?.promotable ? preview.shadowInstanceId : "";
     return `
       <article class="instance-card family-card">
@@ -248,8 +289,13 @@ function renderEvolution() {
             <h2>${escapeHtml(family.name)}</h2>
             <p class="meta">${escapeHtml(family.id)} · Active ${escapeHtml(active?.name || family.activeInstanceId || "n/a")}</p>
           </div>
-          <div class="family-badge ${preview?.promotable ? "is-promotable" : "is-idle"}">
-            ${escapeHtml(preview?.promotable ? "可晋升" : "观察中")}
+          <div class="family-badge-row">
+            <div class="family-badge ${preview?.promotable ? "is-promotable" : "is-idle"}">
+              ${escapeHtml(preview?.promotable ? "可晋升" : "观察中")}
+            </div>
+            <div class="family-badge ${runnerState.className}">
+              ${escapeHtml(runnerState.label)}
+            </div>
           </div>
         </div>
         <div class="instance-stats-grid family-stats-grid">
@@ -270,6 +316,18 @@ function renderEvolution() {
             <p class="meta">${escapeHtml(preview ? `delta ${fmtScore(preview.scoreDelta)} / threshold ${fmtScore(preview.requiredScoreDelta)}` : "先跑 active/shadow review" )}</p>
           </div>
         </div>
+        <div class="family-panel">
+          <div>
+            <p class="family-label">最近 Cycle</p>
+            <strong>${escapeHtml(describeEvolutionResult(runner))}</strong>
+            <p class="meta">${escapeHtml(describeEvolutionRunnerMeta(runner))}</p>
+          </div>
+          <div>
+            <p class="family-label">Runner Error</p>
+            <strong>${escapeHtml(runner.lastError || "none")}</strong>
+            <p class="meta">${escapeHtml(runner.lastError ? "需要排查最近一轮的异常链路" : "最近一轮没有异常")}</p>
+          </div>
+        </div>
         <div class="family-shadow-list">
           ${shadows.length
             ? shadows.map((shadow) => `
@@ -282,14 +340,15 @@ function renderEvolution() {
         </div>
         <p class="meta">最近晋升 ${escapeHtml(lastPromotion ? `${fmtDateTime(lastPromotion.approvedAt)} · ${lastPromotion.toInstanceId}` : "暂无")}</p>
         <div class="instance-card-actions">
-          <button type="button" data-family-review="${escapeHtml(family.id)}">Run Review</button>
-          <button type="button" class="secondary-button" data-family-candidate="${escapeHtml(family.id)}">Create Candidate</button>
+          <button type="button" data-family-cycle="${escapeHtml(family.id)}" ${isBusy ? "disabled" : ""}>${escapeHtml(isBusy ? "Cycle Running" : "Run Cycle")}</button>
+          <button type="button" class="secondary-button" data-family-review="${escapeHtml(family.id)}" ${isBusy ? "disabled" : ""}>Run Review</button>
+          <button type="button" class="secondary-button" data-family-candidate="${escapeHtml(family.id)}" ${isBusy ? "disabled" : ""}>Create Candidate</button>
           <button
             type="button"
             class="secondary-button"
             data-family-promote="${escapeHtml(family.id)}"
             data-family-shadow="${escapeHtml(promotableShadowId)}"
-            ${promotableShadowId ? "" : "disabled"}
+            ${promotableShadowId && !isBusy ? "" : "disabled"}
           >Promote</button>
         </div>
       </article>
@@ -378,6 +437,14 @@ async function handleRunReview(familyId) {
   await loadWorkbench();
 }
 
+async function handleRunCycle(familyId) {
+  const payload = await postJson("/api/evolution/cycle/start", { familyId, reason: "manual_cycle" });
+  if (!payload.started) {
+    window.alert("上一轮 evolution cycle 仍在执行，请稍后再试。");
+  }
+  await loadWorkbench();
+}
+
 async function handleCreateCandidate(familyId) {
   const payload = await postJson("/api/evolution/candidate/create", { familyId, createShadow: true });
   const preset = payload.candidate?.preset;
@@ -450,6 +517,11 @@ els.instanceGrid?.addEventListener("click", (event) => {
 els.familyGrid?.addEventListener("click", (event) => {
   const target = event.target;
   if (!(target instanceof HTMLElement)) return;
+  const cycleFamilyId = target.dataset.familyCycle;
+  if (cycleFamilyId) {
+    void handleRunCycle(cycleFamilyId);
+    return;
+  }
   const reviewFamilyId = target.dataset.familyReview;
   if (reviewFamilyId) {
     void handleRunReview(reviewFamilyId);

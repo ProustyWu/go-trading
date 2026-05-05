@@ -3620,6 +3620,12 @@ html[data-theme="light"] .short-tag {
   min-height: 0;
 }
 
+.family-badge-row {
+  display: grid;
+  gap: 8px;
+  justify-items: end;
+}
+
 .family-badge {
   padding: 8px 12px;
   border: 1px solid var(--line);
@@ -3638,6 +3644,24 @@ html[data-theme="light"] .short-tag {
 .family-badge.is-idle {
   color: var(--muted);
   background: var(--panel-soft);
+}
+
+.family-badge.is-running {
+  color: var(--yellow);
+  border-color: rgba(245, 211, 74, 0.38);
+  background: rgba(245, 211, 74, 0.1);
+}
+
+.family-badge.is-ready {
+  color: var(--cyan);
+  border-color: rgba(0, 183, 199, 0.34);
+  background: rgba(0, 183, 199, 0.08);
+}
+
+.family-badge.is-error {
+  color: var(--red);
+  border-color: rgba(255, 69, 69, 0.38);
+  background: rgba(255, 69, 69, 0.1);
 }
 
 .family-stats-grid span strong {
