@@ -9,7 +9,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from .config import (
     DEFAULT_PROMPT_SETTINGS,
@@ -36,6 +36,14 @@ from .config import (
     write_prompt_settings,
     write_trading_settings,
 )
+from .evolution_lab import (
+    compare_active_and_shadow,
+    create_shadow_instance_from_candidate,
+    generate_candidate_prompt,
+    promote_shadow_to_active,
+)
+from .evolution_registry import create_family, read_family_registry, read_promotion_log
+from .evolution_review import REVIEWS_DIR, write_review_report
 from .exchange_cooldown import cooldown_status
 from .http_client import HttpRequestError, request_text
 from .engine import (
@@ -50,7 +58,7 @@ from .engine import (
 from .market import read_latest_scan, refresh_candidate_pool
 from .market import test_candidate_source
 from .instances import clone_instance, create_instance, delete_instance, list_instances, read_instance, rename_instance
-from .utils import DASHBOARD_DIR, now_iso
+from .utils import DASHBOARD_DIR, now_iso, num, read_json
 
 
 SCHEDULE_TRIGGER_WINDOW_SECONDS = 20
@@ -336,6 +344,97 @@ class AppRuntime:
             "dashboardSettings": read_dashboard_settings(),
         }
 
+    def evolution_families_payload(self) -> dict[str, Any]:
+        cards = {item["id"]: self.instance_card_payload(item["id"]) for item in list_instances()}
+        registry = read_family_registry()
+        promotions = read_promotion_log().get("records", [])
+        reports = _latest_reports(limit=300)
+        families_payload: list[dict[str, Any]] = []
+
+        for family in registry.get("families", []):
+            family_id = str(family.get("id") or "").strip()
+            active_instance_id = str(family.get("activeInstanceId") or "").strip()
+            shadow_ids = [
+                str(item or "").strip()
+                for item in family.get("shadowInstanceIds", [])
+                if str(item or "").strip()
+            ]
+            active_instance = cards.get(active_instance_id)
+            shadow_instances = [cards[item] for item in shadow_ids if item in cards]
+            latest_family_review = _latest_review_for_family(reports, family_id)
+            latest_active_review = _latest_review_for_instance(reports, active_instance_id)
+            latest_shadow_reviews = [
+                review
+                for review in (_latest_review_for_instance(reports, shadow_id) for shadow_id in shadow_ids)
+                if isinstance(review, dict)
+            ]
+
+            latest_candidate = None
+            candidate_rows: list[dict[str, Any]] = []
+            active_prompt = read_prompt_settings(active_instance_id) if active_instance_id else None
+            if active_prompt and (family.get("currentPresetId") or active_prompt.get("presetId")):
+                candidate_rows.append(
+                    {
+                        "instanceId": active_instance_id,
+                        "presetId": active_prompt.get("presetId"),
+                        "name": active_prompt.get("name"),
+                        "updated": active_prompt.get("updated"),
+                        "sortAt": str((cards.get(active_instance_id) or {}).get("createdAt") or active_prompt.get("updated") or ""),
+                    }
+                )
+            for shadow_id in shadow_ids:
+                prompt = read_prompt_settings(shadow_id)
+                candidate_rows.append(
+                    {
+                        "instanceId": shadow_id,
+                        "presetId": prompt.get("presetId"),
+                        "name": prompt.get("name"),
+                        "updated": prompt.get("updated"),
+                        "sortAt": str((cards.get(shadow_id) or {}).get("createdAt") or prompt.get("updated") or ""),
+                    }
+                )
+            if candidate_rows:
+                latest_candidate = max(candidate_rows, key=lambda item: str(item.get("sortAt") or ""))
+                latest_candidate.pop("sortAt", None)
+
+            settings = read_trading_settings(active_instance_id) if active_instance_id else read_trading_settings()
+            shadow_gate = settings.get("evolutionLab", {}).get("shadow", {})
+            best_preview = None
+            if latest_active_review:
+                for shadow_review in latest_shadow_reviews:
+                    preview = compare_active_and_shadow(
+                        active_review=latest_active_review,
+                        shadow_review=shadow_review,
+                        required_score_delta=float(shadow_gate.get("requiredScoreDelta", 3.0) or 3.0),
+                        min_shadow_decisions=int(shadow_gate.get("minShadowDecisions", 20) or 20),
+                        min_shadow_closed_trades=int(shadow_gate.get("minShadowClosedTrades", 10) or 10),
+                    )
+                    if best_preview is None or float(preview.get("scoreDelta") or 0.0) > float(best_preview.get("scoreDelta") or 0.0):
+                        best_preview = preview
+
+            family_promotions = [item for item in promotions if str(item.get("familyId") or "").strip() == family_id]
+            family_promotions.sort(key=lambda item: str(item.get("approvedAt") or ""), reverse=True)
+            families_payload.append(
+                {
+                    **family,
+                    "activeInstance": active_instance,
+                    "shadowInstances": shadow_instances,
+                    "latestFamilyReview": latest_family_review,
+                    "latestActiveReview": latest_active_review,
+                    "latestShadowReviews": latest_shadow_reviews,
+                    "latestCandidate": latest_candidate,
+                    "promotionPreview": best_preview,
+                    "promotionCount": len(family_promotions),
+                    "lastPromotion": family_promotions[0] if family_promotions else None,
+                }
+            )
+
+        return {
+            "updatedAt": now_iso(),
+            "families": families_payload,
+            "reviews": reports[:50],
+        }
+
     def _run_scan_job(self, instance_id: str, reason: str) -> None:
         runner = self._scan_runner(instance_id)
         with self.lock:
@@ -564,6 +663,55 @@ def _static_content_type(path: Path) -> str:
     return "application/octet-stream"
 
 
+def _query_value(parsed: Any, key: str) -> str | None:
+    values = parse_qs(parsed.query or "").get(key, [])
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return None
+
+
+def _latest_reports(limit: int = 200, *, family_id: str | None = None, instance_id: str | None = None) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if REVIEWS_DIR.exists():
+        for path in REVIEWS_DIR.glob("review-*.json"):
+            payload = read_json(path, {})
+            if not isinstance(payload, dict):
+                continue
+            row_family_id = str(payload.get("familyId") or "").strip() or None
+            row_instance_id = str(payload.get("instanceId") or "").strip() or None
+            if family_id and row_family_id != str(family_id).strip():
+                continue
+            if instance_id and row_instance_id != str(instance_id).strip():
+                continue
+            rows.append(payload)
+    rows.sort(key=lambda item: str(item.get("generatedAt") or ""), reverse=True)
+    return rows[:limit]
+
+
+def _read_review_by_id(review_id: str) -> dict[str, Any] | None:
+    target = str(review_id or "").strip()
+    if not target:
+        return None
+    payload = read_json(REVIEWS_DIR / f"{target}.json", None)
+    return payload if isinstance(payload, dict) else None
+
+
+def _latest_review_for_instance(reports: list[dict[str, Any]], instance_id: str | None) -> dict[str, Any] | None:
+    target = str(instance_id or "").strip()
+    if not target:
+        return None
+    return next((item for item in reports if str(item.get("instanceId") or "").strip() == target), None)
+
+
+def _latest_review_for_family(reports: list[dict[str, Any]], family_id: str | None) -> dict[str, Any] | None:
+    target = str(family_id or "").strip()
+    if not target:
+        return None
+    return next((item for item in reports if str(item.get("familyId") or "").strip() == target and not item.get("instanceId")), None)
+
+
 class TradingAgentHandler(BaseHTTPRequestHandler):
     runtime: AppRuntime
 
@@ -770,6 +918,167 @@ class TradingAgentHandler(BaseHTTPRequestHandler):
             return _json_response(self, {"started": started, "scanRunner": self.runtime._scan_runner(instance_id)}) or True
         return False
 
+    def _handle_evolution_api(self, method: str, parsed: Any) -> bool:
+        if not parsed.path.startswith("/api/evolution/"):
+            return False
+
+        path = parsed.path
+        if method == "GET" and path == "/api/evolution/families":
+            return _json_response(self, self.runtime.evolution_families_payload()) or True
+        if method == "POST" and path == "/api/evolution/families":
+            payload = _read_json_body(self)
+            active_instance_id = str(payload.get("activeInstanceId") or "").strip()
+            if not active_instance_id:
+                raise ValueError("activeInstanceId is required.")
+            active_prompt = read_prompt_settings(active_instance_id)
+            family_name = str(payload.get("name") or "").strip() or f"{read_instance(active_instance_id)['name']} Evolution Line"
+            family_id = str(payload.get("familyId") or "").strip() or f"family-{active_instance_id}"
+            family = create_family(
+                family_id=family_id,
+                name=family_name,
+                active_instance_id=active_instance_id,
+                current_preset_id=active_prompt.get("presetId"),
+            )
+            self.runtime.record_log("INFO", f"Evolution family 已创建，family={family['id']}，active={active_instance_id}", active_instance_id)
+            return _json_response(self, {"family": family, **self.runtime.evolution_families_payload()}) or True
+        if method == "GET" and path == "/api/evolution/reviews":
+            family_id = _query_value(parsed, "familyId")
+            instance_id = _query_value(parsed, "instanceId")
+            limit = int(num(_query_value(parsed, "limit")) or 50)
+            return _json_response(self, {"reviews": _latest_reports(limit=limit, family_id=family_id, instance_id=instance_id)}) or True
+        if method == "POST" and path == "/api/evolution/review/run":
+            payload = _read_json_body(self)
+            family_id = str(payload.get("familyId") or "").strip() or None
+            instance_id = str(payload.get("instanceId") or "").strip() or None
+            if family_id:
+                family = next(
+                    (item for item in read_family_registry().get("families", []) if str(item.get("id") or "").strip() == family_id),
+                    None,
+                )
+                if not isinstance(family, dict):
+                    raise ValueError(f"Family not found: {family_id}")
+                active_instance_id = str(family.get("activeInstanceId") or "").strip()
+                settings = read_trading_settings(active_instance_id)
+                limit = int(num(payload.get("limit")) or 500)
+                min_decisions = int(num(payload.get("minDecisions")) or settings["evolutionLab"]["minDecisions"])
+                min_closed_trades = int(num(payload.get("minClosedTrades")) or settings["evolutionLab"]["minClosedTrades"])
+                family_review = write_review_report(
+                    family_id=family_id,
+                    limit=limit,
+                    min_decisions=min_decisions,
+                    min_closed_trades=min_closed_trades,
+                )
+                active_review = write_review_report(
+                    instance_id=active_instance_id,
+                    limit=limit,
+                    min_decisions=min_decisions,
+                    min_closed_trades=min_closed_trades,
+                )
+                shadow_reviews = [
+                    write_review_report(
+                        instance_id=str(shadow_id or "").strip(),
+                        limit=limit,
+                        min_decisions=min_decisions,
+                        min_closed_trades=min_closed_trades,
+                    )
+                    for shadow_id in family.get("shadowInstanceIds", [])
+                    if str(shadow_id or "").strip()
+                ]
+                shadow_gate = settings.get("evolutionLab", {}).get("shadow", {})
+                previews = [
+                    compare_active_and_shadow(
+                        active_review=active_review,
+                        shadow_review=shadow_review,
+                        required_score_delta=float(shadow_gate.get("requiredScoreDelta", 3.0) or 3.0),
+                        min_shadow_decisions=int(shadow_gate.get("minShadowDecisions", 20) or 20),
+                        min_shadow_closed_trades=int(shadow_gate.get("minShadowClosedTrades", 10) or 10),
+                    )
+                    for shadow_review in shadow_reviews
+                ]
+                previews.sort(key=lambda item: float(item.get("scoreDelta") or 0.0), reverse=True)
+                self.runtime.record_log("INFO", f"Evolution review 已执行，family={family_id}，shadows={len(shadow_reviews)}", active_instance_id)
+                return _json_response(
+                    self,
+                    {
+                        "familyReview": family_review,
+                        "activeReview": active_review,
+                        "shadowReviews": shadow_reviews,
+                        "promotionPreview": previews[0] if previews else None,
+                        **self.runtime.evolution_families_payload(),
+                    },
+                ) or True
+            if instance_id:
+                settings = read_trading_settings(instance_id)
+                report = write_review_report(
+                    instance_id=instance_id,
+                    limit=int(num(payload.get("limit")) or 500),
+                    min_decisions=int(num(payload.get("minDecisions")) or settings["evolutionLab"]["minDecisions"]),
+                    min_closed_trades=int(num(payload.get("minClosedTrades")) or settings["evolutionLab"]["minClosedTrades"]),
+                )
+                self.runtime.record_log("INFO", f"Evolution review 已执行，instance={instance_id}", instance_id)
+                return _json_response(self, {"review": report}) or True
+            raise ValueError("familyId or instanceId is required.")
+        if method == "POST" and path == "/api/evolution/candidate/create":
+            payload = _read_json_body(self)
+            family_id = str(payload.get("familyId") or "").strip() or None
+            active_instance_id = str(payload.get("instanceId") or "").strip() or None
+            if family_id and not active_instance_id:
+                family = next(
+                    (item for item in read_family_registry().get("families", []) if str(item.get("id") or "").strip() == family_id),
+                    None,
+                )
+                if not isinstance(family, dict):
+                    raise ValueError(f"Family not found: {family_id}")
+                active_instance_id = str(family.get("activeInstanceId") or "").strip()
+            if not active_instance_id:
+                raise ValueError("instanceId or familyId is required.")
+
+            settings = read_trading_settings(active_instance_id)
+            review = payload.get("review") if isinstance(payload.get("review"), dict) else None
+            if review is None and str(payload.get("reviewId") or "").strip():
+                review = _read_review_by_id(str(payload.get("reviewId") or "").strip())
+            if review is None:
+                review = write_review_report(
+                    instance_id=active_instance_id,
+                    limit=int(num(payload.get("limit")) or 500),
+                    min_decisions=int(num(payload.get("minDecisions")) or settings["evolutionLab"]["minDecisions"]),
+                    min_closed_trades=int(num(payload.get("minClosedTrades")) or settings["evolutionLab"]["minClosedTrades"]),
+                )
+            candidate = generate_candidate_prompt(
+                review,
+                instance_id=active_instance_id,
+                candidate_payload=payload.get("candidate") if isinstance(payload.get("candidate"), dict) else None,
+            )
+            shadow = None
+            if family_id and bool(payload.get("createShadow", True)) and settings["evolutionLab"]["shadow"]["enabled"]:
+                shadow = create_shadow_instance_from_candidate(
+                    active_instance_id=active_instance_id,
+                    family_id=family_id,
+                    candidate_preset_id=str(candidate.get("preset", {}).get("id") or ""),
+                )
+            self.runtime.record_log(
+                "INFO",
+                f"Evolution candidate 已生成，preset={candidate.get('preset', {}).get('id', 'n/a')}，shadow={shadow.get('instance', {}).get('id', 'n/a') if isinstance(shadow, dict) else 'skip'}",
+                active_instance_id,
+            )
+            return _json_response(self, {"candidate": candidate, "shadow": shadow, **self.runtime.evolution_families_payload()}) or True
+        if method == "POST" and path == "/api/evolution/promote":
+            payload = _read_json_body(self)
+            family_id = str(payload.get("familyId") or "").strip()
+            shadow_instance_id = str(payload.get("shadowInstanceId") or "").strip()
+            if not family_id or not shadow_instance_id:
+                raise ValueError("familyId and shadowInstanceId are required.")
+            promotion = promote_shadow_to_active(
+                family_id=family_id,
+                shadow_instance_id=shadow_instance_id,
+                reason=str(payload.get("reason") or "manual_promote"),
+                score_delta=num(payload.get("scoreDelta")),
+                auto=bool(payload.get("auto")),
+            )
+            self.runtime.record_log("INFO", f"Evolution promotion 已完成，family={family_id}，target={shadow_instance_id}", shadow_instance_id)
+            return _json_response(self, {"promotion": promotion, **self.runtime.evolution_families_payload()}) or True
+        return False
+
     def do_GET(self) -> None:  # noqa: N802
         self._handle("GET")
 
@@ -787,6 +1096,8 @@ class TradingAgentHandler(BaseHTTPRequestHandler):
                 handled = self._handle_instance_api(method, instance_id, subpath)
                 if handled:
                     return
+            if self._handle_evolution_api(method, parsed):
+                return
             if method == "GET" and parsed.path == "/api/latest":
                 payload = self.runtime.instances_payload()
                 return _json_response(self, payload)

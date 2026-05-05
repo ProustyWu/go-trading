@@ -196,7 +196,8 @@ def create_shadow_instance_from_candidate(
         saved = persist_candidate_preset(active_instance_id, candidate_payload)
         preset = saved["preset"]
 
-    shadow_name = f"{active_instance['name']} · SHADOW · {preset['name']}"
+    source_name = str(active_instance.get("name") or active_instance_id).split(" · SHADOW ·", 1)[0].strip() or active_instance_id
+    shadow_name = f"{source_name} · SHADOW · {preset['name']}"
     shadow_instance = clone_instance(active_instance_id, "paper", shadow_name)
     shadow_instance_id = shadow_instance["id"]
 

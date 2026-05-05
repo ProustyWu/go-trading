@@ -29,8 +29,19 @@
         <div class="workbench-actions">
           <button id="createPaperBtn" type="button">新建模拟盘</button>
           <button id="createLiveBtn" type="button" class="secondary-button">新建实盘</button>
+          <button id="createFamilyBtn" type="button" class="secondary-button">新建 Family</button>
           <button id="refreshWorkbenchBtn" type="button" class="secondary-button">刷新</button>
         </div>
+      </section>
+      <section class="evolution-lab-section">
+        <div class="section-head">
+          <div>
+            <p class="section-kicker">Evolution Lab</p>
+            <h2>策略家族与影子晋升</h2>
+          </div>
+          <p class="meta" id="evolutionMeta">读取 family 状态中…</p>
+        </div>
+        <section class="workbench-grid family-grid" id="familyGrid"></section>
       </section>
       <section class="workbench-grid" id="instanceGrid"></section>
     </main>

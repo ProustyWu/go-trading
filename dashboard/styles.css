@@ -3585,6 +3585,105 @@ html[data-theme="light"] .short-tag {
   font-size: 0.86rem;
 }
 
+.evolution-lab-section {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.section-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: end;
+}
+
+.section-head h2 {
+  margin: 4px 0 0;
+  font-size: 30px;
+}
+
+.section-kicker {
+  margin: 0;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.family-grid {
+  margin-bottom: 4px;
+}
+
+.family-card {
+  min-height: 0;
+}
+
+.family-badge {
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.family-badge.is-promotable {
+  color: #0f5132;
+  border-color: rgba(22, 196, 127, 0.42);
+  background: rgba(22, 196, 127, 0.18);
+}
+
+.family-badge.is-idle {
+  color: var(--muted);
+  background: var(--panel-soft);
+}
+
+.family-stats-grid span strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.family-panel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.family-panel > div {
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  background: var(--panel-soft);
+}
+
+.family-label {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.family-shadow-list {
+  display: grid;
+  gap: 10px;
+}
+
+.family-shadow-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px dashed var(--line);
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+}
+
+.family-shadow-item span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 @media (max-width: 1320px) {
   .workbench-grid {
     grid-template-columns: repeat(auto-fit, minmax(460px, 520px));
@@ -3604,6 +3703,15 @@ html[data-theme="light"] .short-tag {
 
   .instance-card-top {
     flex-direction: column;
+  }
+
+  .section-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .family-panel {
+    grid-template-columns: 1fr;
   }
 
   .instance-card-actions {

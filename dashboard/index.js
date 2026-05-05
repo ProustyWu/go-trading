@@ -4,13 +4,17 @@ const els = {
   workbenchMeta: document.querySelector("#workbenchMeta"),
   workbenchSummary: document.querySelector("#workbenchSummary"),
   instanceGrid: document.querySelector("#instanceGrid"),
+  familyGrid: document.querySelector("#familyGrid"),
+  evolutionMeta: document.querySelector("#evolutionMeta"),
   createPaperBtn: document.querySelector("#createPaperBtn"),
   createLiveBtn: document.querySelector("#createLiveBtn"),
+  createFamilyBtn: document.querySelector("#createFamilyBtn"),
   refreshWorkbenchBtn: document.querySelector("#refreshWorkbenchBtn")
 };
 
 const state = {
   payload: null,
+  evolution: null,
   filter: "all"
 };
 
@@ -35,6 +39,12 @@ function fmtUsd(value) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2
   }).format(num);
+}
+
+function fmtScore(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "n/a";
+  return num.toFixed(2);
 }
 
 function fmtDateTime(value) {
@@ -214,9 +224,92 @@ function renderWorkbench() {
   }
 }
 
+function renderEvolution() {
+  const families = state.evolution?.families || [];
+  const promotableCount = families.filter((item) => item?.promotionPreview?.promotable).length;
+  els.evolutionMeta.textContent = families.length
+    ? `共 ${families.length} 条 family，当前有 ${promotableCount} 条满足晋升门槛`
+    : "还没有 strategy family，可先从某个 paper instance 建一条演化线。";
+
+  els.familyGrid.innerHTML = families.map((family) => {
+    const preview = family.promotionPreview;
+    const active = family.activeInstance;
+    const latestCandidate = family.latestCandidate;
+    const lastPromotion = family.lastPromotion;
+    const activeReview = family.latestActiveReview;
+    const familyReview = family.latestFamilyReview;
+    const shadows = family.shadowInstances || [];
+    const promotableShadowId = preview?.promotable ? preview.shadowInstanceId : "";
+    return `
+      <article class="instance-card family-card">
+        <div class="instance-card-top">
+          <div>
+            <p class="instance-type">FAMILY</p>
+            <h2>${escapeHtml(family.name)}</h2>
+            <p class="meta">${escapeHtml(family.id)} · Active ${escapeHtml(active?.name || family.activeInstanceId || "n/a")}</p>
+          </div>
+          <div class="family-badge ${preview?.promotable ? "is-promotable" : "is-idle"}">
+            ${escapeHtml(preview?.promotable ? "可晋升" : "观察中")}
+          </div>
+        </div>
+        <div class="instance-stats-grid family-stats-grid">
+          <span>Family Review <strong>${escapeHtml(fmtScore(familyReview?.finalScore))}</strong></span>
+          <span>Active Review <strong>${escapeHtml(fmtScore(activeReview?.finalScore))}</strong></span>
+          <span>Shadow 数量 <strong>${escapeHtml(String(shadows.length))}</strong></span>
+          <span>Promotion 次数 <strong>${escapeHtml(String(family.promotionCount || 0))}</strong></span>
+        </div>
+        <div class="family-panel">
+          <div>
+            <p class="family-label">最近 Candidate</p>
+            <strong>${escapeHtml(latestCandidate?.name || "暂无")}</strong>
+            <p class="meta">${escapeHtml(latestCandidate?.presetId || "还未生成候选策略")}</p>
+          </div>
+          <div>
+            <p class="family-label">晋升预览</p>
+            <strong>${escapeHtml(preview ? `${fmtScore(preview.shadowScore)} vs ${fmtScore(preview.activeScore)}` : "暂无可比较结果")}</strong>
+            <p class="meta">${escapeHtml(preview ? `delta ${fmtScore(preview.scoreDelta)} / threshold ${fmtScore(preview.requiredScoreDelta)}` : "先跑 active/shadow review" )}</p>
+          </div>
+        </div>
+        <div class="family-shadow-list">
+          ${shadows.length
+            ? shadows.map((shadow) => `
+              <article class="family-shadow-item">
+                <strong>${escapeHtml(shadow.name)}</strong>
+                <span>${escapeHtml(shadow.id)}</span>
+              </article>
+            `).join("")
+            : `<p class="empty">暂无 shadow instance。</p>`}
+        </div>
+        <p class="meta">最近晋升 ${escapeHtml(lastPromotion ? `${fmtDateTime(lastPromotion.approvedAt)} · ${lastPromotion.toInstanceId}` : "暂无")}</p>
+        <div class="instance-card-actions">
+          <button type="button" data-family-review="${escapeHtml(family.id)}">Run Review</button>
+          <button type="button" class="secondary-button" data-family-candidate="${escapeHtml(family.id)}">Create Candidate</button>
+          <button
+            type="button"
+            class="secondary-button"
+            data-family-promote="${escapeHtml(family.id)}"
+            data-family-shadow="${escapeHtml(promotableShadowId)}"
+            ${promotableShadowId ? "" : "disabled"}
+          >Promote</button>
+        </div>
+      </article>
+    `;
+  }).join("");
+
+  if (!families.length) {
+    els.familyGrid.innerHTML = `<p class="empty">当前还没有 evolution family。</p>`;
+  }
+}
+
 async function loadWorkbench() {
-  state.payload = await getJson("/api/instances");
+  const [payload, evolution] = await Promise.all([
+    getJson("/api/instances"),
+    getJson("/api/evolution/families")
+  ]);
+  state.payload = payload;
+  state.evolution = evolution;
   renderWorkbench();
+  renderEvolution();
 }
 
 async function handleCreate(type) {
@@ -224,6 +317,24 @@ async function handleCreate(type) {
   const name = window.prompt("请输入实例名称", defaultName);
   if (!name) return;
   await postJson("/api/instances", { name, type });
+  await loadWorkbench();
+}
+
+async function handleCreateFamily() {
+  const paperInstances = (state.payload?.instances || []).filter((item) => item.type === "paper");
+  if (!paperInstances.length) {
+    window.alert("请先创建至少一个 paper instance。");
+    return;
+  }
+  const defaultActiveId = paperInstances[0].id;
+  const activeInstanceId = window.prompt(
+    `请输入 active paper instance id。\n可选：${paperInstances.map((item) => `${item.id}(${item.name})`).join("，")}`,
+    defaultActiveId
+  );
+  if (!activeInstanceId) return;
+  const name = window.prompt("请输入 family 名称", `${paperInstances.find((item) => item.id === activeInstanceId)?.name || activeInstanceId} Evolution Line`);
+  if (!name) return;
+  await postJson("/api/evolution/families", { activeInstanceId, name });
   await loadWorkbench();
 }
 
@@ -255,9 +366,56 @@ async function handleDelete(instanceId) {
   await loadWorkbench();
 }
 
+async function handleRunReview(familyId) {
+  const payload = await postJson("/api/evolution/review/run", { familyId });
+  const familyReview = payload.familyReview;
+  const preview = payload.promotionPreview;
+  window.alert(
+    `Review 完成\nfamily score: ${fmtScore(familyReview?.finalScore)}\n` +
+    `promotable: ${preview?.promotable ? "yes" : "no"}\n` +
+    `delta: ${fmtScore(preview?.scoreDelta)}`
+  );
+  await loadWorkbench();
+}
+
+async function handleCreateCandidate(familyId) {
+  const payload = await postJson("/api/evolution/candidate/create", { familyId, createShadow: true });
+  const preset = payload.candidate?.preset;
+  const shadow = payload.shadow?.instance;
+  window.alert(
+    `Candidate 已生成\npreset: ${preset?.id || "n/a"}\n` +
+    `shadow: ${shadow?.id || "未创建"}`
+  );
+  await loadWorkbench();
+}
+
+async function handlePromote(familyId, preferredShadowId = "") {
+  const family = (state.evolution?.families || []).find((item) => item.id === familyId);
+  if (!family) return;
+  const shadowIds = (family.shadowInstances || []).map((item) => item.id);
+  const shadowInstanceId = preferredShadowId || shadowIds[0] || window.prompt(
+    `请输入要晋升的 shadow instance id。\n可选：${shadowIds.join("，")}`,
+    shadowIds[0] || ""
+  );
+  if (!shadowInstanceId) return;
+  const preview = family.promotionPreview;
+  const reason = window.prompt("请输入 promotion 原因", "manual_workbench_promote");
+  if (!reason) return;
+  if (!window.confirm(`确认将 ${shadowInstanceId} 晋升为 ${familyId} 的 active instance？`)) return;
+  await postJson("/api/evolution/promote", {
+    familyId,
+    shadowInstanceId,
+    reason,
+    scoreDelta: preview?.shadowInstanceId === shadowInstanceId ? preview?.scoreDelta : undefined,
+    auto: false
+  });
+  await loadWorkbench();
+}
+
 els.createPaperBtn?.addEventListener("click", () => handleCreate("paper"));
 els.createLiveBtn?.addEventListener("click", () => handleCreate("live"));
-els.refreshWorkbenchBtn?.addEventListener("click", () => loadWorkbench());
+els.createFamilyBtn?.addEventListener("click", () => void handleCreateFamily());
+els.refreshWorkbenchBtn?.addEventListener("click", () => void loadWorkbench());
 els.workbenchSummary?.addEventListener("click", (event) => {
   const target = event.target;
   if (!(target instanceof HTMLElement)) return;
@@ -289,8 +447,29 @@ els.instanceGrid?.addEventListener("click", (event) => {
     void handleDelete(deleteId);
   }
 });
+els.familyGrid?.addEventListener("click", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+  const reviewFamilyId = target.dataset.familyReview;
+  if (reviewFamilyId) {
+    void handleRunReview(reviewFamilyId);
+    return;
+  }
+  const candidateFamilyId = target.dataset.familyCandidate;
+  if (candidateFamilyId) {
+    void handleCreateCandidate(candidateFamilyId);
+    return;
+  }
+  const promoteFamilyId = target.dataset.familyPromote;
+  if (promoteFamilyId) {
+    void handlePromote(promoteFamilyId, target.dataset.familyShadow || "");
+  }
+});
 
 applyTheme();
 void loadWorkbench().catch((error) => {
   els.workbenchMeta.textContent = `加载失败：${error.message}`;
+  if (els.evolutionMeta) {
+    els.evolutionMeta.textContent = `加载失败：${error.message}`;
+  }
 });
