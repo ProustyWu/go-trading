@@ -20,6 +20,24 @@ PROMPT_SETTINGS_PATH = CONFIG_DIR / "trading_prompt.json"
 PROMPT_LIBRARY_PATH = CONFIG_DIR / "trading_prompt_library.json"
 
 
+DEFAULT_EVOLUTION_LAB_SETTINGS = {
+    "enabled": False,
+    "reviewIntervalHours": 24,
+    "reviewLookbackDays": 7,
+    "minClosedTrades": 12,
+    "minDecisions": 20,
+    "autoCreateCandidate": True,
+    "autoPromoteToPaper": False,
+    "allowCandidateSourceMutation": False,
+    "shadow": {
+        "enabled": True,
+        "minShadowDecisions": 20,
+        "minShadowClosedTrades": 10,
+        "requiredScoreDelta": 3.0,
+    },
+}
+
+
 def _instance_path(instance_id: str | None, key: str, legacy_path: Path) -> Path:
     if not instance_id:
         return legacy_path
@@ -62,6 +80,7 @@ DEFAULT_TRADING_SETTINGS = {
         "lookbackDecisions": 300,
         "reviewHorizonHours": 4,
     },
+    "evolutionLab": deepcopy(DEFAULT_EVOLUTION_LAB_SETTINGS),
     "liveExecution": {
         "configPath": "config/live_trading.json",
         "useExchangeProtectionOrders": True,
@@ -236,6 +255,38 @@ def _with_default_text_file(path: Path, default_text: str) -> str:
         return default_text.rstrip() + "\n"
 
 
+def _normalize_evolution_lab_settings(payload: Any, default: dict[str, Any] | None = None) -> dict[str, Any]:
+    source = payload if isinstance(payload, dict) else {}
+    base = deepcopy(default or DEFAULT_EVOLUTION_LAB_SETTINGS)
+    shadow_source = source.get("shadow") if isinstance(source.get("shadow"), dict) else {}
+    shadow_default = base["shadow"]
+    return {
+        **base,
+        **source,
+        "enabled": clean_bool(source.get("enabled"), base["enabled"]),
+        "reviewIntervalHours": int(clamp(source.get("reviewIntervalHours", base["reviewIntervalHours"]), 1, 720)),
+        "reviewLookbackDays": int(clamp(source.get("reviewLookbackDays", base["reviewLookbackDays"]), 1, 365)),
+        "minClosedTrades": int(clamp(source.get("minClosedTrades", base["minClosedTrades"]), 1, 5000)),
+        "minDecisions": int(clamp(source.get("minDecisions", base["minDecisions"]), 1, 5000)),
+        "autoCreateCandidate": clean_bool(source.get("autoCreateCandidate"), base["autoCreateCandidate"]),
+        "autoPromoteToPaper": clean_bool(source.get("autoPromoteToPaper"), base["autoPromoteToPaper"]),
+        "allowCandidateSourceMutation": clean_bool(
+            source.get("allowCandidateSourceMutation"),
+            base["allowCandidateSourceMutation"],
+        ),
+        "shadow": {
+            **shadow_default,
+            **shadow_source,
+            "enabled": clean_bool(shadow_source.get("enabled"), shadow_default["enabled"]),
+            "minShadowDecisions": int(clamp(shadow_source.get("minShadowDecisions", shadow_default["minShadowDecisions"]), 1, 5000)),
+            "minShadowClosedTrades": int(
+                clamp(shadow_source.get("minShadowClosedTrades", shadow_default["minShadowClosedTrades"]), 1, 5000)
+            ),
+            "requiredScoreDelta": clamp(shadow_source.get("requiredScoreDelta", shadow_default["requiredScoreDelta"]), 0, 100),
+        },
+    }
+
+
 def read_trading_settings(instance_id: str | None = None) -> dict[str, Any]:
     payload = _with_default_file(_instance_path(instance_id, "trading_settings", TRADING_SETTINGS_PATH), DEFAULT_TRADING_SETTINGS)
     normalized_payload = {key: value for key, value in payload.items() if key in DEFAULT_TRADING_SETTINGS}
@@ -244,6 +295,7 @@ def read_trading_settings(instance_id: str | None = None) -> dict[str, Any]:
     paper_trading = payload.get("paperTrading") if isinstance(payload.get("paperTrading"), dict) else {}
     live_trading = payload.get("liveTrading") if isinstance(payload.get("liveTrading"), dict) else {}
     self_learning = payload.get("selfLearning") if isinstance(payload.get("selfLearning"), dict) else {}
+    evolution_lab = payload.get("evolutionLab") if isinstance(payload.get("evolutionLab"), dict) else {}
     return {
         **deepcopy(DEFAULT_TRADING_SETTINGS),
         **normalized_payload,
@@ -279,6 +331,7 @@ def read_trading_settings(instance_id: str | None = None) -> dict[str, Any]:
             "lookbackDecisions": int(clamp(self_learning.get("lookbackDecisions", DEFAULT_TRADING_SETTINGS["selfLearning"]["lookbackDecisions"]), 20, 2000)),
             "reviewHorizonHours": int(clamp(self_learning.get("reviewHorizonHours", DEFAULT_TRADING_SETTINGS["selfLearning"]["reviewHorizonHours"]), 1, 72)),
         },
+        "evolutionLab": _normalize_evolution_lab_settings(evolution_lab),
         "server": {
             "host": str(server_settings.get("host") or DEFAULT_TRADING_SETTINGS["server"]["host"]),
             "port": int(clamp(server_settings.get("port"), 1024, 65535)),
@@ -302,6 +355,7 @@ def write_trading_settings(patch: dict[str, Any], instance_id: str | None = None
     paper_trading_patch = patch.get("paperTrading") if isinstance(patch.get("paperTrading"), dict) else {}
     live_trading_patch = patch.get("liveTrading") if isinstance(patch.get("liveTrading"), dict) else {}
     self_learning_patch = patch.get("selfLearning") if isinstance(patch.get("selfLearning"), dict) else {}
+    evolution_lab_patch = patch.get("evolutionLab") if isinstance(patch.get("evolutionLab"), dict) else {}
     next_payload = {
         **current,
         **normalized_patch,
@@ -337,6 +391,7 @@ def write_trading_settings(patch: dict[str, Any], instance_id: str | None = None
             "lookbackDecisions": int(clamp(self_learning_patch.get("lookbackDecisions", current["selfLearning"]["lookbackDecisions"]), 20, 2000)),
             "reviewHorizonHours": int(clamp(self_learning_patch.get("reviewHorizonHours", current["selfLearning"]["reviewHorizonHours"]), 1, 72)),
         },
+        "evolutionLab": _normalize_evolution_lab_settings(evolution_lab_patch, current["evolutionLab"]),
         "server": {
             "host": str(server_patch.get("host") or current["server"]["host"]),
             "port": int(clamp(server_patch.get("port", current["server"]["port"]), 1024, 65535)),

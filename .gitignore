@@ -2,6 +2,8 @@ __pycache__/
 *.pyc
 *.pyo
 .DS_Store
+aitd.log
+aitd-dev.log
 .venv/
 venv/
 .pytest_cache/
@@ -10,6 +12,7 @@ data/cache/
 data/scans/
 data/scan-archive/
 data/instances/
+data/evolution/
 data/exchange_cooldowns.json
 data/trading-agent/decisions/
 data/trading_agent_state.json

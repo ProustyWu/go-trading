@@ -17,6 +17,7 @@ from .config import (
 from .exchange_cooldown import cooldown_status
 from .exchanges import base_asset_for_symbol, get_active_exchange_gateway
 from .evolution import historical_lessons_for_prompt
+from .evolution_registry import family_for_instance
 from .instances import instance_paths, read_instance
 from .live_trading import (
     apply_symbol_settings,
@@ -36,7 +37,7 @@ from .market import (
     read_latest_scan,
     refresh_candidate_pool,
 )
-from .utils import DATA_DIR, clamp, current_run_date, now_iso, num, one_line, read_json, safe_last, write_json
+from .utils import DATA_DIR, clamp, current_run_date, now_iso, num, one_line, read_json, safe_last, sha1_hex, write_json
 
 
 STATE_PATH = DATA_DIR / "trading_agent_state.json"
@@ -425,12 +426,19 @@ def derive_session_started_at(book: dict[str, Any]) -> str | None:
 
 
 def normalize_decision(decision: dict[str, Any]) -> dict[str, Any]:
+    strategy_meta = _normalize_strategy_meta(decision)
     return {
         "id": str(decision.get("id") or f"decision-{int(__import__('time').time() * 1000)}"),
         "startedAt": decision.get("startedAt") or now_iso(),
         "finishedAt": decision.get("finishedAt") or now_iso(),
         "runnerReason": decision.get("runnerReason") or "manual",
         "mode": clean_mode(decision.get("mode")),
+        "instanceId": strategy_meta["instanceId"],
+        "familyId": strategy_meta["familyId"],
+        "presetId": strategy_meta["presetId"],
+        "promptName": strategy_meta["promptName"],
+        "promptHash": strategy_meta["promptHash"],
+        "strategyMeta": strategy_meta,
         "prompt": str(decision.get("prompt") or ""),
         "promptSummary": str(decision.get("promptSummary") or ""),
         "output": decision.get("output") if isinstance(decision.get("output"), dict) else {},
@@ -503,6 +511,54 @@ def archive_decision(decision: dict[str, Any], instance_id: str | None = None) -
     run_date = current_run_date()
     path = _decisions_dir(instance_id) / run_date / f"{decision['id']}.json"
     write_json(path, decision)
+
+
+def _prompt_hash(prompt_settings: dict[str, Any]) -> str:
+    payload = {
+        "name": str(prompt_settings.get("name") or "default_trading_logic"),
+        "presetId": str(prompt_settings.get("presetId") or "").strip() or None,
+        "klineFeeds": prompt_settings.get("klineFeeds") if isinstance(prompt_settings.get("klineFeeds"), dict) else {},
+        "decision_logic": prompt_settings.get("decision_logic") if isinstance(prompt_settings.get("decision_logic"), dict) else {},
+    }
+    return sha1_hex(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+
+def _normalize_strategy_meta(decision: dict[str, Any]) -> dict[str, Any]:
+    raw_meta = decision.get("strategyMeta") if isinstance(decision.get("strategyMeta"), dict) else {}
+    instance_id = str(decision.get("instanceId") or raw_meta.get("instanceId") or "").strip() or None
+    family_id = str(decision.get("familyId") or raw_meta.get("familyId") or "").strip() or None
+    preset_id = str(decision.get("presetId") or raw_meta.get("presetId") or "").strip() or None
+    prompt_name = str(decision.get("promptName") or raw_meta.get("promptName") or "").strip() or None
+    prompt_hash = str(decision.get("promptHash") or raw_meta.get("promptHash") or "").strip() or None
+    return {
+        "instanceId": instance_id,
+        "familyId": family_id,
+        "presetId": preset_id,
+        "promptName": prompt_name,
+        "promptHash": prompt_hash,
+    }
+
+
+def apply_strategy_metadata(
+    decision: dict[str, Any],
+    *,
+    prompt_settings: dict[str, Any] | None = None,
+    instance_id: str | None = None,
+) -> dict[str, Any]:
+    settings = prompt_settings if isinstance(prompt_settings, dict) else read_prompt_settings(instance_id)
+    family = family_for_instance(instance_id)
+    strategy_meta = {
+        "instanceId": str(instance_id or "").strip() or None,
+        "familyId": family.get("id") if isinstance(family, dict) else None,
+        "presetId": str(settings.get("presetId") or "").strip() or None,
+        "promptName": str(settings.get("name") or "default_trading_logic"),
+        "promptHash": _prompt_hash(settings),
+    }
+    return {
+        **decision,
+        **strategy_meta,
+        "strategyMeta": strategy_meta,
+    }
 
 
 def position_pnl(position: dict[str, Any], mark_price: float | None) -> float | None:
@@ -2243,30 +2299,33 @@ def run_trading_cycle(reason: str = "manual", mode_override: str | None = None, 
             book["lastDecisionAt"] = now_iso()
             warnings = dedupe_messages(warnings + [active_cooldown.get("message") or summary])
             decision = normalize_decision(
-                {
-                    "id": decision_id,
-                    "startedAt": now_iso(),
-                    "finishedAt": now_iso(),
-                    "runnerReason": reason,
-                    "mode": settings["mode"],
-                    "prompt": "",
-                    "promptSummary": summary,
-                    "output": {
-                        "summary": summary,
-                        "positionActions": [],
-                        "entryActions": [],
-                        "watchlist": [],
-                        "providerStatus": provider_status(provider),
-                        "liveExecutionStatus": live_status_payload,
+                apply_strategy_metadata(
+                    {
+                        "id": decision_id,
+                        "startedAt": now_iso(),
+                        "finishedAt": now_iso(),
+                        "runnerReason": reason,
+                        "mode": settings["mode"],
+                        "prompt": "",
+                        "promptSummary": summary,
+                        "output": {
+                            "summary": summary,
+                            "positionActions": [],
+                            "entryActions": [],
+                            "watchlist": [],
+                            "providerStatus": provider_status(provider),
+                            "liveExecutionStatus": live_status_payload,
+                        },
+                        "rawModelResponse": {},
+                        "actions": [],
+                        "executionEvents": [],
+                        "warnings": warnings,
+                        "candidateUniverse": [],
+                        "accountBefore": account_snapshot,
+                        "accountAfter": account_snapshot,
                     },
-                    "rawModelResponse": {},
-                    "actions": [],
-                    "executionEvents": [],
-                    "warnings": warnings,
-                    "candidateUniverse": [],
-                    "accountBefore": account_snapshot,
-                    "accountAfter": account_snapshot,
-                }
+                    instance_id=instance_id,
+                )
             )
             book.setdefault("decisions", []).append(decision)
             state["adaptive"] = {
@@ -2638,23 +2697,27 @@ def run_trading_cycle(reason: str = "manual", mode_override: str | None = None, 
     if historical_lessons:
         output_payload["historicalLessons"] = historical_lessons
     decision = normalize_decision(
-        {
-            "id": decision_id,
-            "startedAt": now_iso(),
-            "finishedAt": now_iso(),
-            "runnerReason": reason,
-            "mode": settings["mode"],
-            "prompt": prompt,
-            "promptSummary": one_line(parsed_model.get("summary") or f"Managed {len(account_before['openPositions'])} positions and reviewed {len(candidate_snapshots)} candidates."),
-            "output": output_payload,
-            "rawModelResponse": model_result or {},
-            "actions": management_actions + breaker_actions + entry_actions,
-            "executionEvents": execution_events,
-            "warnings": warnings,
-            "candidateUniverse": [serialize_candidate_for_history(item) for item in candidate_snapshots],
-            "accountBefore": account_before,
-            "accountAfter": account_after,
-        }
+        apply_strategy_metadata(
+            {
+                "id": decision_id,
+                "startedAt": now_iso(),
+                "finishedAt": now_iso(),
+                "runnerReason": reason,
+                "mode": settings["mode"],
+                "prompt": prompt,
+                "promptSummary": one_line(parsed_model.get("summary") or f"Managed {len(account_before['openPositions'])} positions and reviewed {len(candidate_snapshots)} candidates."),
+                "output": output_payload,
+                "rawModelResponse": model_result or {},
+                "actions": management_actions + breaker_actions + entry_actions,
+                "executionEvents": execution_events,
+                "warnings": warnings,
+                "candidateUniverse": [serialize_candidate_for_history(item) for item in candidate_snapshots],
+                "accountBefore": account_before,
+                "accountAfter": account_after,
+            },
+            prompt_settings=prompt_settings,
+            instance_id=instance_id,
+        )
     )
     book.setdefault("decisions", []).append(decision)
     state["adaptive"] = {
@@ -2922,6 +2985,7 @@ def summarize_trading_state(instance_id: str | None = None, *, include_live_stat
 
 def flatten_active_account(reason: str = "manual_flatten", mode_override: str | None = None, instance_id: str | None = None) -> dict[str, Any]:
     settings = read_trading_settings(instance_id)
+    prompt_settings = read_prompt_settings(instance_id)
     target_mode = clean_mode(mode_override or settings["mode"])
     state = read_trading_state(settings, instance_id)
     account_key = account_key_for_mode(target_mode)
@@ -2971,22 +3035,26 @@ def flatten_active_account(reason: str = "manual_flatten", mode_override: str | 
             book, action = close_position(book, position, num(position.get("lastMarkPrice")) or num(position.get("entryPrice")) or 0, decision_id, reason)
             actions.append(action)
     decision = normalize_decision(
-        {
-            "id": decision_id,
-            "startedAt": now_iso(),
-            "finishedAt": now_iso(),
-            "runnerReason": "manual",
-            "mode": target_mode,
-            "prompt": f"Flatten all open {target_mode} positions because: {reason}",
-            "promptSummary": f"Flattened {len(actions)} open {target_mode} positions.",
-            "actions": actions,
-            "executionEvents": execution_events,
-            "warnings": warnings,
-            "output": {"actions": actions},
-            "candidateUniverse": [],
-            "accountBefore": {},
-            "accountAfter": summarize_account(book, {**settings, "mode": target_mode}),
-        }
+        apply_strategy_metadata(
+            {
+                "id": decision_id,
+                "startedAt": now_iso(),
+                "finishedAt": now_iso(),
+                "runnerReason": "manual",
+                "mode": target_mode,
+                "prompt": f"Flatten all open {target_mode} positions because: {reason}",
+                "promptSummary": f"Flattened {len(actions)} open {target_mode} positions.",
+                "actions": actions,
+                "executionEvents": execution_events,
+                "warnings": warnings,
+                "output": {"actions": actions},
+                "candidateUniverse": [],
+                "accountBefore": {},
+                "accountAfter": summarize_account(book, {**settings, "mode": target_mode}),
+            },
+            prompt_settings=prompt_settings,
+            instance_id=instance_id,
+        )
     )
     book.setdefault("decisions", []).append(decision)
     if account_key == "live" and execution_events:
