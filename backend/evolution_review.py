@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+import time
 from typing import Any
 
 from .evolution_registry import read_family_registry
@@ -44,7 +45,7 @@ def _family_instance_ids(family_id: str) -> list[str]:
     return result
 
 
-def _read_instance_decisions(instance_id: str, limit: int) -> list[dict[str, Any]]:
+def _read_instance_decisions(instance_id: str, limit: int, *, since_ts: float | None = None) -> list[dict[str, Any]]:
     root = _decisions_dir(instance_id)
     if not root.exists():
         return []
@@ -59,6 +60,8 @@ def _read_instance_decisions(instance_id: str, limit: int) -> list[dict[str, Any
             ts = _parse_ts(payload.get("finishedAt") or payload.get("startedAt"))
             if ts <= 0:
                 continue
+            if since_ts is not None and ts < since_ts:
+                continue
             rows.append({"ts": ts, "payload": payload, "path": path})
     rows.sort(key=lambda item: item["ts"])
     return [item["payload"] for item in rows[-limit:]]
@@ -69,6 +72,7 @@ def load_family_decisions(
     instance_id: str | None = None,
     family_id: str | None = None,
     limit: int = 500,
+    lookback_days: int | None = None,
 ) -> list[dict[str, Any]]:
     if instance_id:
         instance_ids = [str(instance_id).strip()]
@@ -77,9 +81,13 @@ def load_family_decisions(
     else:
         return []
 
+    since_ts = None
+    if lookback_days is not None and int(lookback_days) > 0:
+        since_ts = time.time() - (int(lookback_days) * 24 * 60 * 60)
+
     rows: list[dict[str, Any]] = []
     for current_id in instance_ids:
-        for payload in _read_instance_decisions(current_id, limit):
+        for payload in _read_instance_decisions(current_id, limit, since_ts=since_ts):
             row_instance_id = str(payload.get("instanceId") or payload.get("strategyMeta", {}).get("instanceId") or current_id).strip()
             row_family_id = str(payload.get("familyId") or payload.get("strategyMeta", {}).get("familyId") or "").strip() or None
             if instance_id and row_instance_id != str(instance_id).strip():
@@ -180,8 +188,9 @@ def write_review_report(
     limit: int = 500,
     min_decisions: int = 20,
     min_closed_trades: int = 12,
+    lookback_days: int | None = None,
 ) -> dict[str, Any]:
-    decisions = load_family_decisions(instance_id=instance_id, family_id=family_id, limit=limit)
+    decisions = load_family_decisions(instance_id=instance_id, family_id=family_id, limit=limit, lookback_days=lookback_days)
     metrics = build_review_metrics(
         decisions,
         min_decisions=min_decisions,
@@ -199,6 +208,7 @@ def write_review_report(
         "window": {
             "from": decisions[0].get("startedAt") if decisions else None,
             "to": (decisions[-1].get("finishedAt") or decisions[-1].get("startedAt")) if decisions else None,
+            "lookbackDays": int(lookback_days) if lookback_days is not None else None,
         },
         "sample": {
             "decisions": scored["decisions"],

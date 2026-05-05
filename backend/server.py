@@ -210,6 +210,7 @@ class AppRuntime:
         self.log_entries: deque[dict[str, Any]] = deque(maxlen=800)
         self.scan_runners: dict[str, dict[str, Any]] = {}
         self.trade_runners: dict[str, dict[str, Any]] = {}
+        self.evolution_runners: dict[str, dict[str, Any]] = {}
         self.trade_locks: dict[str, threading.Lock] = {}
         self._scheduler_started = False
 
@@ -228,6 +229,9 @@ class AppRuntime:
 
     def _trade_runner(self, instance_id: str) -> dict[str, Any]:
         return self.trade_runners.setdefault(instance_id, self._runner_template())
+
+    def _evolution_runner(self, family_id: str) -> dict[str, Any]:
+        return self.evolution_runners.setdefault(family_id, self._runner_template())
 
     def _trade_lock(self, instance_id: str) -> threading.Lock:
         lock = self.trade_locks.get(instance_id)
@@ -502,6 +506,41 @@ class AppRuntime:
         thread.start()
         return True
 
+    def _run_evolution_job(self, family_id: str, reason: str) -> None:
+        runner = self._evolution_runner(family_id)
+        with self.lock:
+            runner["running"] = True
+            runner["lastStartedAt"] = now_iso()
+            runner["lastFinishedAt"] = None
+            runner["lastError"] = None
+            runner["lastReason"] = reason
+        try:
+            result = run_family_evolution_cycle(family_id, reason=reason)
+            family_review = result.get("familyReview") if isinstance(result.get("familyReview"), dict) else {}
+            promotion = result.get("promotion") if isinstance(result.get("promotion"), dict) else None
+            candidate = result.get("candidate") if isinstance(result.get("candidate"), dict) else None
+            self.record_log(
+                "INFO",
+                f"Evolution cycle 完成，family={family_id}，score={family_review.get('finalScore', 'n/a')}，candidate={candidate.get('preset', {}).get('id', 'skip') if candidate else 'skip'}，promotion={promotion.get('toInstanceId', 'skip') if promotion else 'skip'}",
+            )
+        except Exception as error:
+            with self.lock:
+                runner["lastError"] = str(error)
+            self.record_log("ERROR", f"Evolution cycle 失败，family={family_id}：{error}")
+        finally:
+            with self.lock:
+                runner["running"] = False
+                runner["lastFinishedAt"] = now_iso()
+
+    def start_evolution(self, family_id: str, reason: str = "manual") -> bool:
+        runner = self._evolution_runner(family_id)
+        with self.lock:
+            if runner["running"]:
+                return False
+        thread = threading.Thread(target=self._run_evolution_job, args=(family_id, reason), daemon=True)
+        thread.start()
+        return True
+
     @staticmethod
     def _aligned_slot(reference_ts: float, interval_minutes: int, offset_minutes: int = 0) -> tuple[float, float]:
         timezone_offset = 8 * 60 * 60
@@ -588,6 +627,33 @@ class AppRuntime:
                 continue
             self.start_trade(instance["id"], "scheduled")
 
+    def _maybe_start_scheduled_evolution(self) -> None:
+        now_ts = time.time()
+        for family in read_family_registry().get("families", []):
+            family_id = str(family.get("id") or "").strip()
+            active_instance_id = str(family.get("activeInstanceId") or "").strip()
+            if not family_id or not active_instance_id:
+                continue
+            try:
+                active_instance = read_instance(active_instance_id)
+                if active_instance["type"] != "paper":
+                    continue
+                settings = read_trading_settings(active_instance_id)
+            except Exception:
+                continue
+            lab_settings = settings.get("evolutionLab", {})
+            if not bool(lab_settings.get("enabled")):
+                continue
+            latest_family_review = _latest_review_for_family(_latest_reports(limit=1, family_id=family_id), family_id)
+            latest_ts = _parse_iso_timestamp((latest_family_review or {}).get("generatedAt"))
+            review_interval_seconds = int(num(lab_settings.get("reviewIntervalHours")) or 24) * 60 * 60
+            if latest_ts is not None and (now_ts - latest_ts) < review_interval_seconds:
+                continue
+            runner = self._evolution_runner(family_id)
+            if runner["running"]:
+                continue
+            self.start_evolution(family_id, "scheduled")
+
     def start_scheduler(self) -> None:
         if self._scheduler_started:
             return
@@ -598,6 +664,7 @@ class AppRuntime:
                 try:
                     self._maybe_start_scheduled_scan()
                     self._maybe_start_scheduled_trade()
+                    self._maybe_start_scheduled_evolution()
                 except Exception as error:
                     self.record_log("ERROR", f"调度器异常：{error}")
                 time.sleep(10)
@@ -698,6 +765,16 @@ def _read_review_by_id(review_id: str) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _parse_iso_timestamp(value: Any) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return __import__("datetime").datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
 def _latest_review_for_instance(reports: list[dict[str, Any]], instance_id: str | None) -> dict[str, Any] | None:
     target = str(instance_id or "").strip()
     if not target:
@@ -710,6 +787,151 @@ def _latest_review_for_family(reports: list[dict[str, Any]], family_id: str | No
     if not target:
         return None
     return next((item for item in reports if str(item.get("familyId") or "").strip() == target and not item.get("instanceId")), None)
+
+
+def _family_by_id(family_id: str) -> dict[str, Any]:
+    target = str(family_id or "").strip()
+    family = next(
+        (item for item in read_family_registry().get("families", []) if str(item.get("id") or "").strip() == target),
+        None,
+    )
+    if not isinstance(family, dict):
+        raise ValueError(f"Family not found: {target}")
+    return family
+
+
+def _review_limit_from_lab(lab_settings: dict[str, Any]) -> int:
+    min_decisions = int(num(lab_settings.get("minDecisions")) or 20)
+    min_closed_trades = int(num(lab_settings.get("minClosedTrades")) or 12)
+    return max(200, min_decisions * 8, min_closed_trades * 12)
+
+
+def _latest_promotion_for_family(family_id: str) -> dict[str, Any] | None:
+    records = [
+        item
+        for item in read_promotion_log().get("records", [])
+        if str(item.get("familyId") or "").strip() == str(family_id or "").strip()
+    ]
+    records.sort(key=lambda item: str(item.get("approvedAt") or ""), reverse=True)
+    return records[0] if records else None
+
+
+def _family_has_pending_shadow(family: dict[str, Any]) -> bool:
+    shadow_ids = [
+        str(item or "").strip()
+        for item in family.get("shadowInstanceIds", [])
+        if str(item or "").strip()
+    ]
+    if not shadow_ids:
+        return False
+    last_promotion = _latest_promotion_for_family(str(family.get("id") or ""))
+    cutoff_ts = _parse_iso_timestamp((last_promotion or {}).get("approvedAt"))
+    if cutoff_ts is None:
+        return True
+    for shadow_id in shadow_ids:
+        try:
+            shadow_instance = read_instance(shadow_id)
+        except Exception:
+            continue
+        created_ts = _parse_iso_timestamp(shadow_instance.get("createdAt"))
+        if created_ts is None or created_ts >= cutoff_ts:
+            return True
+    return False
+
+
+def run_family_evolution_cycle(family_id: str, *, reason: str = "manual") -> dict[str, Any]:
+    family = _family_by_id(family_id)
+    active_instance_id = str(family.get("activeInstanceId") or "").strip()
+    if not active_instance_id:
+        raise ValueError(f"Family has no active instance: {family_id}")
+    active_instance = read_instance(active_instance_id)
+    settings = read_trading_settings(active_instance_id)
+    lab_settings = settings.get("evolutionLab", {})
+    shadow_gate = lab_settings.get("shadow", {})
+    lookback_days = int(num(lab_settings.get("reviewLookbackDays")) or 7)
+    min_decisions = int(num(lab_settings.get("minDecisions")) or 20)
+    min_closed_trades = int(num(lab_settings.get("minClosedTrades")) or 12)
+    review_limit = _review_limit_from_lab(lab_settings)
+
+    family_review = write_review_report(
+        family_id=family_id,
+        limit=review_limit,
+        min_decisions=min_decisions,
+        min_closed_trades=min_closed_trades,
+        lookback_days=lookback_days,
+    )
+    active_review = write_review_report(
+        instance_id=active_instance_id,
+        limit=review_limit,
+        min_decisions=min_decisions,
+        min_closed_trades=min_closed_trades,
+        lookback_days=lookback_days,
+    )
+    shadow_reviews = [
+        write_review_report(
+            instance_id=str(shadow_id or "").strip(),
+            limit=review_limit,
+            min_decisions=min_decisions,
+            min_closed_trades=min_closed_trades,
+            lookback_days=lookback_days,
+        )
+        for shadow_id in family.get("shadowInstanceIds", [])
+        if str(shadow_id or "").strip()
+    ]
+    previews = [
+        compare_active_and_shadow(
+            active_review=active_review,
+            shadow_review=shadow_review,
+            required_score_delta=float(shadow_gate.get("requiredScoreDelta", 3.0) or 3.0),
+            min_shadow_decisions=int(shadow_gate.get("minShadowDecisions", 20) or 20),
+            min_shadow_closed_trades=int(shadow_gate.get("minShadowClosedTrades", 10) or 10),
+        )
+        for shadow_review in shadow_reviews
+    ]
+    previews.sort(key=lambda item: float(item.get("scoreDelta") or 0.0), reverse=True)
+    best_preview = previews[0] if previews else None
+
+    candidate = None
+    shadow = None
+    promotion = None
+    if active_instance["type"] == "paper" and bool(lab_settings.get("autoCreateCandidate")) and not family_review.get("insufficientSample"):
+        if not _family_has_pending_shadow(family):
+            candidate = generate_candidate_prompt(family_review, instance_id=active_instance_id, candidate_payload=None)
+            if bool(shadow_gate.get("enabled", True)):
+                candidate_preset_id = str(candidate.get("preset", {}).get("id") or "").strip()
+                if candidate_preset_id:
+                    shadow = create_shadow_instance_from_candidate(
+                        active_instance_id=active_instance_id,
+                        family_id=family_id,
+                        candidate_preset_id=candidate_preset_id,
+                    )
+
+    if (
+        active_instance["type"] == "paper"
+        and bool(lab_settings.get("autoPromoteToPaper"))
+        and isinstance(best_preview, dict)
+        and bool(best_preview.get("promotable"))
+        and str(best_preview.get("shadowInstanceId") or "").strip()
+    ):
+        promotion = promote_shadow_to_active(
+            family_id=family_id,
+            shadow_instance_id=str(best_preview.get("shadowInstanceId") or "").strip(),
+            reason=f"{reason}_auto_promote",
+            score_delta=num(best_preview.get("scoreDelta")),
+            auto=False,
+        )
+
+    return {
+        "family": family,
+        "activeInstance": active_instance,
+        "familyReview": family_review,
+        "activeReview": active_review,
+        "shadowReviews": shadow_reviews,
+        "promotionPreview": best_preview,
+        "candidate": candidate,
+        "shadow": shadow,
+        "promotion": promotion,
+    }
 
 
 class TradingAgentHandler(BaseHTTPRequestHandler):
@@ -960,6 +1182,7 @@ class TradingAgentHandler(BaseHTTPRequestHandler):
                 active_instance_id = str(family.get("activeInstanceId") or "").strip()
                 settings = read_trading_settings(active_instance_id)
                 limit = int(num(payload.get("limit")) or 500)
+                lookback_days = int(num(payload.get("lookbackDays")) or settings["evolutionLab"]["reviewLookbackDays"])
                 min_decisions = int(num(payload.get("minDecisions")) or settings["evolutionLab"]["minDecisions"])
                 min_closed_trades = int(num(payload.get("minClosedTrades")) or settings["evolutionLab"]["minClosedTrades"])
                 family_review = write_review_report(
@@ -967,12 +1190,14 @@ class TradingAgentHandler(BaseHTTPRequestHandler):
                     limit=limit,
                     min_decisions=min_decisions,
                     min_closed_trades=min_closed_trades,
+                    lookback_days=lookback_days,
                 )
                 active_review = write_review_report(
                     instance_id=active_instance_id,
                     limit=limit,
                     min_decisions=min_decisions,
                     min_closed_trades=min_closed_trades,
+                    lookback_days=lookback_days,
                 )
                 shadow_reviews = [
                     write_review_report(
@@ -980,6 +1205,7 @@ class TradingAgentHandler(BaseHTTPRequestHandler):
                         limit=limit,
                         min_decisions=min_decisions,
                         min_closed_trades=min_closed_trades,
+                        lookback_days=lookback_days,
                     )
                     for shadow_id in family.get("shadowInstanceIds", [])
                     if str(shadow_id or "").strip()
@@ -1014,6 +1240,7 @@ class TradingAgentHandler(BaseHTTPRequestHandler):
                     limit=int(num(payload.get("limit")) or 500),
                     min_decisions=int(num(payload.get("minDecisions")) or settings["evolutionLab"]["minDecisions"]),
                     min_closed_trades=int(num(payload.get("minClosedTrades")) or settings["evolutionLab"]["minClosedTrades"]),
+                    lookback_days=int(num(payload.get("lookbackDays")) or settings["evolutionLab"]["reviewLookbackDays"]),
                 )
                 self.runtime.record_log("INFO", f"Evolution review 已执行，instance={instance_id}", instance_id)
                 return _json_response(self, {"review": report}) or True
@@ -1043,6 +1270,7 @@ class TradingAgentHandler(BaseHTTPRequestHandler):
                     limit=int(num(payload.get("limit")) or 500),
                     min_decisions=int(num(payload.get("minDecisions")) or settings["evolutionLab"]["minDecisions"]),
                     min_closed_trades=int(num(payload.get("minClosedTrades")) or settings["evolutionLab"]["minClosedTrades"]),
+                    lookback_days=int(num(payload.get("lookbackDays")) or settings["evolutionLab"]["reviewLookbackDays"]),
                 )
             candidate = generate_candidate_prompt(
                 review,
