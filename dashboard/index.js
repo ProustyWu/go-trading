@@ -237,6 +237,13 @@ function evolutionRunnerState(runner) {
   return { label: "Cycle Idle", className: "is-idle" };
 }
 
+function familyStatusMeta(status) {
+  const next = String(status || "active").toLowerCase();
+  if (next === "paused") return { label: "Paused", className: "is-paused" };
+  if (next === "archived") return { label: "Archived", className: "is-archived" };
+  return { label: "Active", className: "is-active" };
+}
+
 function describeEvolutionResult(runner) {
   const result = runner?.lastResult;
   if (!result) {
@@ -265,12 +272,14 @@ function renderEvolution() {
   const promotableCount = families.filter((item) => item?.promotionPreview?.promotable).length;
   const runningCount = families.filter((item) => item?.evolutionRunner?.running).length;
   const errorCount = families.filter((item) => item?.evolutionRunner?.lastError).length;
+  const pausedCount = families.filter((item) => String(item?.status || "active").toLowerCase() === "paused").length;
   els.evolutionMeta.textContent = families.length
-    ? `共 ${families.length} 条 family，运行中 ${runningCount} 条，可晋升 ${promotableCount} 条，异常 ${errorCount} 条`
+    ? `共 ${families.length} 条 family，运行中 ${runningCount} 条，可晋升 ${promotableCount} 条，暂停 ${pausedCount} 条，异常 ${errorCount} 条`
     : "还没有 strategy family，可先从某个 paper instance 建一条演化线。";
 
   els.familyGrid.innerHTML = families.map((family) => {
     const preview = family.promotionPreview;
+    const familyActions = family.familyActions || {};
     const active = family.activeInstance;
     const latestCandidate = family.latestCandidate;
     const lastPromotion = family.lastPromotion;
@@ -279,6 +288,7 @@ function renderEvolution() {
     const shadows = family.shadowInstances || [];
     const runner = family.evolutionRunner || {};
     const runnerState = evolutionRunnerState(runner);
+    const statusMeta = familyStatusMeta(family.status);
     const isBusy = Boolean(runner.running);
     const promotableShadowId = preview?.promotable ? preview.shadowInstanceId : "";
     return `
@@ -290,6 +300,9 @@ function renderEvolution() {
             <p class="meta">${escapeHtml(family.id)} · Active ${escapeHtml(active?.name || family.activeInstanceId || "n/a")}</p>
           </div>
           <div class="family-badge-row">
+            <div class="family-badge ${statusMeta.className}">
+              ${escapeHtml(statusMeta.label)}
+            </div>
             <div class="family-badge ${preview?.promotable ? "is-promotable" : "is-idle"}">
               ${escapeHtml(preview?.promotable ? "可晋升" : "观察中")}
             </div>
@@ -314,6 +327,7 @@ function renderEvolution() {
             <p class="family-label">晋升预览</p>
             <strong>${escapeHtml(preview ? `${fmtScore(preview.shadowScore)} vs ${fmtScore(preview.activeScore)}` : "暂无可比较结果")}</strong>
             <p class="meta">${escapeHtml(preview ? `delta ${fmtScore(preview.scoreDelta)} / threshold ${fmtScore(preview.requiredScoreDelta)}` : "先跑 active/shadow review" )}</p>
+            <p class="meta">${escapeHtml(preview?.highlights?.length ? `优势：${preview.highlights.join(" · ")}` : preview?.drags?.length ? `阻塞：${preview.drags.join(" · ")}` : "当前还没有结构化晋升解释")}</p>
           </div>
         </div>
         <div class="family-panel">
@@ -346,16 +360,19 @@ function renderEvolution() {
         </div>
         <p class="meta">最近晋升 ${escapeHtml(lastPromotion ? `${fmtDateTime(lastPromotion.approvedAt)} · ${lastPromotion.toInstanceId}` : "暂无")}</p>
         <div class="instance-card-actions">
-          <button type="button" data-family-cycle="${escapeHtml(family.id)}" ${isBusy ? "disabled" : ""}>${escapeHtml(isBusy ? "Cycle Running" : "Run Cycle")}</button>
-          <button type="button" class="secondary-button" data-family-review="${escapeHtml(family.id)}" ${isBusy ? "disabled" : ""}>Run Review</button>
-          <button type="button" class="secondary-button" data-family-candidate="${escapeHtml(family.id)}" ${isBusy ? "disabled" : ""}>Create Candidate</button>
+          <button type="button" data-family-cycle="${escapeHtml(family.id)}" ${familyActions.canRunCycle && !isBusy ? "" : "disabled"}>${escapeHtml(isBusy ? "Cycle Running" : "Run Cycle")}</button>
+          <button type="button" class="secondary-button" data-family-review="${escapeHtml(family.id)}" ${familyActions.canRunReview && !isBusy ? "" : "disabled"}>Run Review</button>
+          <button type="button" class="secondary-button" data-family-candidate="${escapeHtml(family.id)}" ${familyActions.canCreateCandidate && !isBusy ? "" : "disabled"}>Create Candidate</button>
           <button
             type="button"
             class="secondary-button"
             data-family-promote="${escapeHtml(family.id)}"
             data-family-shadow="${escapeHtml(promotableShadowId)}"
-            ${promotableShadowId && !isBusy ? "" : "disabled"}
+            ${promotableShadowId && familyActions.canPromote && !isBusy ? "" : "disabled"}
           >Promote</button>
+          <button type="button" class="secondary-button" data-family-status="${escapeHtml(family.id)}" data-family-next-status="paused" ${familyActions.canPause ? "" : "disabled"}>Pause</button>
+          <button type="button" class="secondary-button" data-family-status="${escapeHtml(family.id)}" data-family-next-status="active" ${familyActions.canResume ? "" : "disabled"}>Resume</button>
+          <button type="button" class="secondary-button danger-outline" data-family-status="${escapeHtml(family.id)}" data-family-next-status="archived" ${familyActions.canArchive ? "" : "disabled"}>Archive</button>
         </div>
       </article>
     `;
@@ -485,6 +502,15 @@ async function handlePromote(familyId, preferredShadowId = "") {
   await loadWorkbench();
 }
 
+async function handleFamilyStatus(familyId, nextStatus) {
+  const family = (state.evolution?.families || []).find((item) => item.id === familyId);
+  if (!family) return;
+  const label = nextStatus === "active" ? "恢复" : nextStatus === "paused" ? "暂停" : "归档";
+  if (!window.confirm(`确认${label} family「${family.name}」？`)) return;
+  await postJson("/api/evolution/family/status", { familyId, status: nextStatus });
+  await loadWorkbench();
+}
+
 async function handleRetireShadow(familyId, shadowInstanceId) {
   const family = (state.evolution?.families || []).find((item) => item.id === familyId);
   const shadow = (family?.shadowInstances || []).find((item) => item.id === shadowInstanceId);
@@ -542,6 +568,11 @@ els.familyGrid?.addEventListener("click", (event) => {
   const shadowRetireId = target.dataset.shadowRetire;
   if (shadowRetireId) {
     void handleRetireShadow(target.dataset.familyId || "", shadowRetireId);
+    return;
+  }
+  const familyStatusId = target.dataset.familyStatus;
+  if (familyStatusId) {
+    void handleFamilyStatus(familyStatusId, target.dataset.familyNextStatus || "");
     return;
   }
   const cycleFamilyId = target.dataset.familyCycle;

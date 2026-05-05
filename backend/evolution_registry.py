@@ -9,6 +9,7 @@ from .utils import DATA_DIR, now_iso, read_json, write_json
 EVOLUTION_DIR = DATA_DIR / "evolution"
 FAMILY_REGISTRY_PATH = EVOLUTION_DIR / "registry.json"
 PROMOTION_LOG_PATH = EVOLUTION_DIR / "promotions.json"
+FAMILY_STATUS_VALUES = {"active", "paused", "archived"}
 
 
 def _default_registry_payload() -> dict[str, Any]:
@@ -33,6 +34,9 @@ def _normalize_family(item: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Family id is required.")
     created_at = str(item.get("createdAt") or now_iso())
     updated_at = str(item.get("updatedAt") or created_at)
+    status = str(item.get("status") or "active").strip().lower() or "active"
+    if status not in FAMILY_STATUS_VALUES:
+        status = "active"
     shadow_ids: list[str] = []
     for value in item.get("shadowInstanceIds", []):
         shadow_id = str(value or "").strip()
@@ -43,6 +47,7 @@ def _normalize_family(item: dict[str, Any]) -> dict[str, Any]:
         "name": str(item.get("name") or family_id),
         "activeInstanceId": str(item.get("activeInstanceId") or "").strip(),
         "shadowInstanceIds": shadow_ids,
+        "status": status,
         "currentPresetId": item.get("currentPresetId"),
         "createdAt": created_at,
         "updatedAt": updated_at,
@@ -163,6 +168,7 @@ def create_family(
             "name": name,
             "activeInstanceId": active_instance_id,
             "shadowInstanceIds": [],
+            "status": "active",
             "currentPresetId": current_preset_id,
             "createdAt": now_iso(),
             "updatedAt": now_iso(),
@@ -214,6 +220,20 @@ def detach_instance_membership(instance_id: str | None) -> dict[str, Any] | None
     if str(family.get("activeInstanceId") or "").strip() == target:
         raise ValueError("Active family instance cannot be detached directly.")
     return detach_shadow_instance(str(family.get("id") or "").strip(), target)
+
+
+def set_family_status(family_id: str, status: str) -> dict[str, Any]:
+    target_status = str(status or "").strip().lower()
+    if target_status not in FAMILY_STATUS_VALUES:
+        raise ValueError(f"Unsupported family status: {status}")
+    registry = read_family_registry()
+    index = _family_index(registry["families"], family_id)
+    family = dict(registry["families"][index])
+    family["status"] = target_status
+    family["updatedAt"] = now_iso()
+    registry["families"][index] = _normalize_family(family)
+    write_family_registry(registry)
+    return registry["families"][index]
 
 
 def record_promotion(

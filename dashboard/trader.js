@@ -484,6 +484,13 @@ function evolutionRunnerState(runner) {
   return { label: "Cycle Idle", className: "is-idle" };
 }
 
+function familyStatusMeta(status) {
+  const value = String(status || "active").trim().toLowerCase();
+  if (value === "paused") return { value, label: "Paused", className: "is-paused" };
+  if (value === "archived") return { value, label: "Archived", className: "is-archived" };
+  return { value: "active", label: "Active", className: "is-active" };
+}
+
 function describeEvolutionResult(runner) {
   const result = runner?.lastResult;
   if (!result) {
@@ -505,6 +512,35 @@ function describeEvolutionRunnerMeta(runner) {
   if (runner?.lastFinishedAt) parts.push(`finish ${fmtDateTime(runner.lastFinishedAt)}`);
   if (Number.isFinite(Number(runner?.lastDurationSeconds))) parts.push(`耗时 ${fmtDurationSeconds(runner.lastDurationSeconds)}`);
   return parts.join(" · ") || "尚无运行记录";
+}
+
+function describePromotionPreview(preview) {
+  if (!preview) {
+    return {
+      headline: "暂无可比较结果",
+      summary: "当前实例还没有可用的晋升比较",
+      detail: "先跑 active/shadow review，形成可比较的 scorecard。"
+    };
+  }
+  return {
+    headline: `${fmtScore(preview.shadowScore)} vs ${fmtScore(preview.activeScore)}`,
+    summary: `delta ${fmtScore(preview.scoreDelta)} / threshold ${fmtScore(preview.requiredScoreDelta)}`,
+    detail: preview?.highlights?.length
+      ? `优势：${preview.highlights.join(" · ")}`
+      : preview?.drags?.length
+        ? `阻塞：${preview.drags.join(" · ")}`
+        : "当前还没有结构化晋升解释"
+  };
+}
+
+function evolutionFeedbackText(evolution) {
+  const family = evolution?.family;
+  const runner = evolution?.evolutionRunner || {};
+  const status = familyStatusMeta(family?.status);
+  if (runner.lastError) return `最近一轮异常：${runner.lastError}`;
+  if (status.value === "archived") return "当前 family 已归档，只保留查看和历史复盘，不能再生成 candidate 或晋升。";
+  if (status.value === "paused") return "当前 family 已暂停，自动调度已停止；需要 Resume 后才会继续跑 cycle。";
+  return "可以在这里直接执行 family 级 cycle/review，或对当前 shadow 做 promote/retire。";
 }
 
 function parseSortTime(value) {
@@ -2239,14 +2275,20 @@ function renderEvolution() {
   const preview = evolution.promotionPreview;
   const lastPromotion = evolution.lastPromotion;
   const busy = Boolean(runner.running);
-  const roleLabel = role === "active" ? "Active" : "Shadow";
+  const roleLabel = role === "active" ? "Active" : role === "shadow" ? "Shadow" : "Unbound";
+  const statusMeta = familyStatusMeta(family.status);
+  const previewSummary = describePromotionPreview(preview);
 
-  els.evolutionMeta.textContent = `${family.name} · ${roleLabel} · Runner ${runnerState.label}`;
+  els.evolutionMeta.textContent = `${family.name} · ${roleLabel} · ${statusMeta.label} · Runner ${runnerState.label}`;
   els.evolutionPanel.innerHTML = `
     <div class="overview-strip evolution-overview-strip">
       <div class="overview-pill">
         <span>Role</span>
         <strong>${escapeHtml(roleLabel)}</strong>
+      </div>
+      <div class="overview-pill">
+        <span>Status</span>
+        <strong>${escapeHtml(statusMeta.label)}</strong>
       </div>
       <div class="overview-pill">
         <span>Family Review</span>
@@ -2274,6 +2316,9 @@ function renderEvolution() {
         <p class="family-label">Family</p>
         <strong>${escapeHtml(family.id)}</strong>
         <p class="meta">Active ${escapeHtml(active?.name || family.activeInstanceId || "n/a")} · 当前 preset ${escapeHtml(family.currentPresetId || "n/a")}</p>
+        <div class="family-badge-row evolution-badge-row">
+          <div class="family-badge ${statusMeta.className}">${escapeHtml(statusMeta.label)}</div>
+        </div>
       </div>
       <div>
         <p class="family-label">Runner</p>
@@ -2285,8 +2330,9 @@ function renderEvolution() {
       </div>
       <div>
         <p class="family-label">Promotion Preview</p>
-        <strong>${escapeHtml(preview ? `${fmtScore(preview.shadowScore)} vs ${fmtScore(preview.activeScore)}` : "暂无可比较结果")}</strong>
-        <p class="meta">${escapeHtml(preview ? `delta ${fmtScore(preview.scoreDelta)} / threshold ${fmtScore(preview.requiredScoreDelta)}` : "当前实例还没有可用的晋升比较")}</p>
+        <strong>${escapeHtml(previewSummary.headline)}</strong>
+        <p class="meta">${escapeHtml(previewSummary.summary)}</p>
+        <p class="meta">${escapeHtml(previewSummary.detail)}</p>
       </div>
       <div>
         <p class="family-label">Last Promotion</p>
@@ -2314,12 +2360,13 @@ function renderEvolution() {
       <button type="button" class="secondary-button" data-evolution-review="${escapeHtml(family.id)}" ${actions.canRunReview && !busy ? "" : "disabled"}>Run Review</button>
       <button type="button" class="secondary-button" data-evolution-candidate="${escapeHtml(family.id)}" ${actions.canCreateCandidate && !busy ? "" : "disabled"}>Create Candidate</button>
       <button type="button" class="secondary-button" data-evolution-promote="${escapeHtml(family.id)}" ${actions.canPromoteShadow && !busy ? "" : "disabled"}>Promote Shadow</button>
+      <button type="button" class="secondary-button" data-evolution-family-status="${escapeHtml(family.id)}" data-evolution-next-status="paused" ${actions.canPauseFamily && !busy ? "" : "disabled"}>Pause</button>
+      <button type="button" class="secondary-button" data-evolution-family-status="${escapeHtml(family.id)}" data-evolution-next-status="active" ${actions.canResumeFamily && !busy ? "" : "disabled"}>Resume</button>
+      <button type="button" class="secondary-button danger-outline" data-evolution-family-status="${escapeHtml(family.id)}" data-evolution-next-status="archived" ${actions.canArchiveFamily && !busy ? "" : "disabled"}>Archive</button>
       <button type="button" class="secondary-button danger-outline" data-evolution-retire="${escapeHtml(state.instance?.id || "")}" ${actions.canRetireShadow && !busy ? "" : "disabled"}>Retire Shadow</button>
     </div>
   `;
-  els.evolutionFeedback.textContent = runner.lastError
-    ? `最近一轮异常：${runner.lastError}`
-    : "可以在这里直接执行 family 级 cycle/review，或对当前 shadow 做 promote/retire。";
+  els.evolutionFeedback.textContent = evolutionFeedbackText(evolution);
 }
 
 function renderPositionActionCard(action) {
@@ -2908,6 +2955,21 @@ async function handleRetireCurrentShadow() {
     window.location.href = "/";
   } catch (error) {
     els.evolutionFeedback.textContent = `退役失败：${error.message}`;
+  }
+}
+
+async function handleEvolutionFamilyStatus(nextStatus) {
+  const familyId = state.evolution?.family?.id;
+  if (!familyId) return;
+  const statusMeta = familyStatusMeta(nextStatus);
+  if (!window.confirm(`确认将当前 family 状态切换为 ${statusMeta.label}？`)) return;
+  els.evolutionFeedback.textContent = `正在切换 family 状态为 ${statusMeta.label}…`;
+  try {
+    await postJson("/api/evolution/family/status", { familyId, status: nextStatus });
+    await loadData();
+    els.evolutionFeedback.textContent = `Family 状态已切换为 ${statusMeta.label}。`;
+  } catch (error) {
+    els.evolutionFeedback.textContent = `切换 family 状态失败：${error.message}`;
   }
 }
 
@@ -3506,7 +3568,7 @@ async function handleSaveLiveConfig(event) {
 function handleEvolutionPanelClick(event) {
   const rawTarget = event.target;
   if (!(rawTarget instanceof HTMLElement)) return;
-  const target = rawTarget.closest("[data-evolution-cycle],[data-evolution-review],[data-evolution-candidate],[data-evolution-promote],[data-evolution-retire],[data-evolution-view-shadow]");
+  const target = rawTarget.closest("[data-evolution-cycle],[data-evolution-review],[data-evolution-candidate],[data-evolution-promote],[data-evolution-retire],[data-evolution-view-shadow],[data-evolution-family-status]");
   if (!(target instanceof HTMLElement)) return;
   if (target.dataset.evolutionCycle) {
     void handleRunEvolutionCycle();
@@ -3526,6 +3588,10 @@ function handleEvolutionPanelClick(event) {
   }
   if (target.dataset.evolutionRetire) {
     void handleRetireCurrentShadow();
+    return;
+  }
+  if (target.dataset.evolutionFamilyStatus) {
+    void handleEvolutionFamilyStatus(target.dataset.evolutionNextStatus || "active");
     return;
   }
   if (target.dataset.evolutionViewShadow) {

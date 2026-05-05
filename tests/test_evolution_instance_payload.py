@@ -25,6 +25,7 @@ class EvolutionInstancePayloadTests(unittest.TestCase):
                     "name": "Paper Default Evolution Line",
                     "activeInstanceId": "paper-active",
                     "shadowInstanceIds": ["paper-shadow"],
+                    "status": "paused",
                     "currentPresetId": "paper-default-active-v3",
                     "activeInstance": {"id": "paper-active", "name": "Paper Active", "type": "paper"},
                     "shadowInstances": [{"id": "paper-shadow", "name": "Paper Shadow", "type": "paper"}],
@@ -40,6 +41,7 @@ class EvolutionInstancePayloadTests(unittest.TestCase):
                         "scoreDelta": 4.5,
                         "requiredScoreDelta": 3.0,
                         "promotable": True,
+                        "highlights": ["expectancy +1.2", "drawdown +1.5"],
                     },
                     "promotionCount": 1,
                     "lastPromotion": {"approvedAt": "2026-05-05T04:40:00Z", "toInstanceId": "paper-active"},
@@ -52,10 +54,15 @@ class EvolutionInstancePayloadTests(unittest.TestCase):
 
         self.assertEqual(payload["role"], "shadow")
         self.assertEqual(payload["family"]["id"], "family-paper-default")
+        self.assertEqual(payload["family"]["status"], "paused")
         self.assertTrue(payload["actions"]["canRetireShadow"])
-        self.assertTrue(payload["actions"]["canPromoteShadow"])
+        self.assertFalse(payload["actions"]["canPromoteShadow"])
         self.assertFalse(payload["actions"]["canCreateCandidate"])
+        self.assertFalse(payload["actions"]["canPauseFamily"])
+        self.assertTrue(payload["actions"]["canResumeFamily"])
+        self.assertTrue(payload["actions"]["canArchiveFamily"])
         self.assertEqual(payload["promotionPreview"]["shadowInstanceId"], "paper-shadow")
+        self.assertEqual(payload["promotionPreview"]["highlights"][0], "expectancy +1.2")
         self.assertEqual(payload["latestInstanceReview"]["id"], "review-shadow")
 
     def test_evolution_instance_payload_marks_unbound_instance(self) -> None:
@@ -70,6 +77,9 @@ class EvolutionInstancePayloadTests(unittest.TestCase):
         self.assertIsNone(payload["family"])
         self.assertFalse(payload["actions"]["canRunCycle"])
         self.assertFalse(payload["actions"]["canRetireShadow"])
+        self.assertFalse(payload["actions"]["canPauseFamily"])
+        self.assertFalse(payload["actions"]["canResumeFamily"])
+        self.assertFalse(payload["actions"]["canArchiveFamily"])
 
 
 if __name__ == "__main__":

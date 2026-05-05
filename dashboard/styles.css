@@ -3663,6 +3663,24 @@ html[data-theme="light"] .short-tag {
   background: rgba(22, 196, 127, 0.18);
 }
 
+.family-badge.is-active {
+  color: var(--green);
+  border-color: rgba(0, 200, 120, 0.36);
+  background: rgba(0, 200, 120, 0.08);
+}
+
+.family-badge.is-paused {
+  color: var(--yellow);
+  border-color: rgba(245, 211, 74, 0.38);
+  background: rgba(245, 211, 74, 0.1);
+}
+
+.family-badge.is-archived {
+  color: var(--muted);
+  border-color: rgba(154, 154, 144, 0.28);
+  background: rgba(154, 154, 144, 0.08);
+}
+
 .family-badge.is-idle {
   color: var(--muted);
   background: var(--panel-soft);

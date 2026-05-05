@@ -44,6 +44,7 @@ from .evolution_lab import (
     retire_shadow_instance,
 )
 from .evolution_registry import create_family, detach_instance_membership, family_for_instance, read_family_registry, read_promotion_log
+from .evolution_registry import set_family_status
 from .evolution_review import REVIEWS_DIR, write_review_report
 from .exchange_cooldown import cooldown_status
 from .http_client import HttpRequestError, request_text
@@ -407,6 +408,7 @@ class AppRuntime:
             settings = read_trading_settings(active_instance_id) if active_instance_id else read_trading_settings()
             shadow_gate = settings.get("evolutionLab", {}).get("shadow", {})
             best_preview = None
+            family_status = _family_status(family)
             if latest_active_review:
                 for shadow_review in latest_shadow_reviews:
                     preview = compare_active_and_shadow(
@@ -434,6 +436,15 @@ class AppRuntime:
                     "promotionPreview": best_preview,
                     "promotionCount": len(family_promotions),
                     "lastPromotion": family_promotions[0] if family_promotions else None,
+                    "familyActions": {
+                        "canRunCycle": family_status != "archived",
+                        "canRunReview": family_status != "archived",
+                        "canCreateCandidate": family_status == "active",
+                        "canPromote": family_status == "active" and bool((best_preview or {}).get("promotable")),
+                        "canPause": family_status == "active",
+                        "canResume": family_status == "paused",
+                        "canArchive": family_status in {"active", "paused"},
+                    },
                 }
             )
 
@@ -474,6 +485,9 @@ class AppRuntime:
                     "canCreateCandidate": False,
                     "canPromoteShadow": False,
                     "canRetireShadow": False,
+                    "canPauseFamily": False,
+                    "canResumeFamily": False,
+                    "canArchiveFamily": False,
                 },
             }
 
@@ -487,6 +501,7 @@ class AppRuntime:
             None,
         )
         preview = family.get("promotionPreview")
+        family_status = _family_status(family)
         if (
             role == "shadow"
             and (not isinstance(preview, dict) or str(preview.get("shadowInstanceId") or "").strip() != target)
@@ -512,6 +527,7 @@ class AppRuntime:
                 "name": family.get("name"),
                 "activeInstanceId": family.get("activeInstanceId"),
                 "shadowInstanceIds": family.get("shadowInstanceIds", []),
+                "status": family_status,
                 "currentPresetId": family.get("currentPresetId"),
                 "promotionCount": family.get("promotionCount"),
             },
@@ -524,11 +540,14 @@ class AppRuntime:
             "lastPromotion": family.get("lastPromotion"),
             "evolutionRunner": family.get("evolutionRunner"),
             "actions": {
-                "canRunCycle": True,
-                "canRunReview": True,
-                "canCreateCandidate": role == "active",
-                "canPromoteShadow": role == "shadow" and bool((preview or {}).get("promotable")),
-                "canRetireShadow": role == "shadow",
+                "canRunCycle": family_status != "archived",
+                "canRunReview": family_status != "archived",
+                "canCreateCandidate": role == "active" and family_status == "active",
+                "canPromoteShadow": role == "shadow" and family_status == "active" and bool((preview or {}).get("promotable")),
+                "canRetireShadow": role == "shadow" and family_status != "archived",
+                "canPauseFamily": family_status == "active",
+                "canResumeFamily": family_status == "paused",
+                "canArchiveFamily": family_status in {"active", "paused"},
             },
         }
 
@@ -736,6 +755,8 @@ class AppRuntime:
             active_instance_id = str(family.get("activeInstanceId") or "").strip()
             if not family_id or not active_instance_id:
                 continue
+            if _family_status(family) != "active":
+                continue
             try:
                 active_instance = read_instance(active_instance_id)
                 if active_instance["type"] != "paper":
@@ -902,6 +923,11 @@ def _family_by_id(family_id: str) -> dict[str, Any]:
     return family
 
 
+def _family_status(family: dict[str, Any] | None) -> str:
+    status = str((family or {}).get("status") or "active").strip().lower()
+    return status if status in {"active", "paused", "archived"} else "active"
+
+
 def _review_limit_from_lab(lab_settings: dict[str, Any]) -> int:
     min_decisions = int(num(lab_settings.get("minDecisions")) or 20)
     min_closed_trades = int(num(lab_settings.get("minClosedTrades")) or 12)
@@ -943,6 +969,8 @@ def _family_has_pending_shadow(family: dict[str, Any]) -> bool:
 
 def run_family_evolution_cycle(family_id: str, *, reason: str = "manual") -> dict[str, Any]:
     family = _family_by_id(family_id)
+    if _family_status(family) == "archived":
+        raise ValueError(f"Archived family cannot run evolution cycle: {family_id}")
     active_instance_id = str(family.get("activeInstanceId") or "").strip()
     if not active_instance_id:
         raise ValueError(f"Family has no active instance: {family_id}")
@@ -1135,6 +1163,8 @@ class TradingAgentHandler(BaseHTTPRequestHandler):
             family = family_for_instance(instance_id)
             if not isinstance(family, dict) or str(family.get("activeInstanceId") or "").strip() == str(instance_id or "").strip():
                 raise RuntimeError("当前实例不是可退役的 shadow。")
+            if _family_status(family) == "archived":
+                raise RuntimeError("Archived family cannot retire shadows.")
             payload = _read_json_body(self)
             retired = retire_shadow_instance(
                 family_id=str(family.get("id") or "").strip(),
@@ -1331,6 +1361,16 @@ class TradingAgentHandler(BaseHTTPRequestHandler):
             )
             self.runtime.record_log("INFO", f"Evolution family 已创建，family={family['id']}，active={active_instance_id}", active_instance_id)
             return _json_response(self, {"family": family, **self.runtime.evolution_families_payload()}) or True
+        if method == "POST" and path == "/api/evolution/family/status":
+            payload = _read_json_body(self)
+            family_id = str(payload.get("familyId") or "").strip()
+            if not family_id:
+                raise ValueError("familyId is required.")
+            family = _family_by_id(family_id)
+            status = str(payload.get("status") or "").strip().lower()
+            updated = set_family_status(family_id, status)
+            self.runtime.record_log("INFO", f"Evolution family 状态已更新，family={family_id}，status={updated['status']}", str(family.get("activeInstanceId") or "").strip() or None)
+            return _json_response(self, {"family": updated, **self.runtime.evolution_families_payload()}) or True
         if method == "GET" and path == "/api/evolution/reviews":
             family_id = _query_value(parsed, "familyId")
             instance_id = _query_value(parsed, "instanceId")
@@ -1343,6 +1383,8 @@ class TradingAgentHandler(BaseHTTPRequestHandler):
                 raise ValueError("familyId is required.")
             reason = str(payload.get("reason") or "manual_cycle").strip() or "manual_cycle"
             family = _family_by_id(family_id)
+            if _family_status(family) == "archived":
+                raise RuntimeError("Archived family cannot start a new evolution cycle.")
             active_instance_id = str(family.get("activeInstanceId") or "").strip() or None
             started = self.runtime.start_evolution(family_id, reason)
             if started:
@@ -1369,6 +1411,8 @@ class TradingAgentHandler(BaseHTTPRequestHandler):
                 )
                 if not isinstance(family, dict):
                     raise ValueError(f"Family not found: {family_id}")
+                if _family_status(family) == "archived":
+                    raise RuntimeError("Archived family is read-only.")
                 active_instance_id = str(family.get("activeInstanceId") or "").strip()
                 settings = read_trading_settings(active_instance_id)
                 limit = int(num(payload.get("limit")) or 500)
@@ -1446,6 +1490,8 @@ class TradingAgentHandler(BaseHTTPRequestHandler):
                 )
                 if not isinstance(family, dict):
                     raise ValueError(f"Family not found: {family_id}")
+                if _family_status(family) != "active":
+                    raise RuntimeError("Only active families can create new candidates.")
                 active_instance_id = str(family.get("activeInstanceId") or "").strip()
             if not active_instance_id:
                 raise ValueError("instanceId or familyId is required.")
@@ -1486,6 +1532,9 @@ class TradingAgentHandler(BaseHTTPRequestHandler):
             shadow_instance_id = str(payload.get("shadowInstanceId") or "").strip()
             if not family_id or not shadow_instance_id:
                 raise ValueError("familyId and shadowInstanceId are required.")
+            family = _family_by_id(family_id)
+            if _family_status(family) != "active":
+                raise RuntimeError("Only active families can promote shadows.")
             promotion = promote_shadow_to_active(
                 family_id=family_id,
                 shadow_instance_id=shadow_instance_id,

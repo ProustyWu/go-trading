@@ -26,6 +26,13 @@ class EvolutionPromotionTests(unittest.TestCase):
             "finalScore": 11.5,
             "insufficientSample": False,
             "sample": {"decisions": 24, "closedTrades": 12},
+            "scorecard": {
+                "realizedPnl": 12.0,
+                "expectancy": 1.0,
+                "maxDrawdownPct": 6.0,
+                "disciplinePenalty": 2.0,
+                "lowConfidencePenalty": 1.5,
+            },
         }
         shadow_review = {
             "id": "review-shadow",
@@ -33,6 +40,13 @@ class EvolutionPromotionTests(unittest.TestCase):
             "finalScore": 16.2,
             "insufficientSample": False,
             "sample": {"decisions": 26, "closedTrades": 14},
+            "scorecard": {
+                "realizedPnl": 14.0,
+                "expectancy": 2.2,
+                "maxDrawdownPct": 4.5,
+                "disciplinePenalty": 1.0,
+                "lowConfidencePenalty": 0.0,
+            },
         }
 
         comparison = evolution_lab.compare_active_and_shadow(
@@ -44,6 +58,9 @@ class EvolutionPromotionTests(unittest.TestCase):
         self.assertTrue(comparison["promotable"])
         self.assertEqual(comparison["winner"], "shadow")
         self.assertEqual(comparison["scoreDelta"], 4.7)
+        self.assertIn("componentDelta", comparison)
+        self.assertGreater(comparison["componentDelta"]["expectancy"], 0)
+        self.assertTrue(comparison["highlights"])
 
     def test_promote_shadow_to_active_swaps_family_active_and_records_promotion(self) -> None:
         from backend import config, evolution_lab, evolution_registry, instances

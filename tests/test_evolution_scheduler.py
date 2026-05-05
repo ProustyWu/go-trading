@@ -160,6 +160,7 @@ class EvolutionSchedulerTests(unittest.TestCase):
             "activeInstanceId": "paper-default",
             "shadowInstanceIds": [],
             "currentPresetId": "paper-default-active-v1",
+            "status": "active",
         }
 
         with patch.object(server, "read_family_registry", return_value={"families": [family]}), patch.object(
@@ -181,6 +182,7 @@ class EvolutionSchedulerTests(unittest.TestCase):
             "activeInstanceId": "paper-default",
             "shadowInstanceIds": [],
             "currentPresetId": "paper-default-active-v1",
+            "status": "active",
         }
         recent_review = {
             "id": "review-family-paper-default-latest",
@@ -194,6 +196,30 @@ class EvolutionSchedulerTests(unittest.TestCase):
         ), patch.object(server, "read_trading_settings", return_value={"evolutionLab": _lab_settings()}), patch.object(
             server, "_latest_reports", return_value=[recent_review]
         ), patch.object(runtime, "start_evolution", return_value=True) as start_evolution:
+            runtime._maybe_start_scheduled_evolution()
+
+        start_evolution.assert_not_called()
+
+    def test_maybe_start_scheduled_evolution_skips_paused_family(self) -> None:
+        from backend import server
+
+        runtime = server.AppRuntime()
+        family = {
+            "id": "family-paper-default",
+            "name": "Paper Default Evolution Line",
+            "activeInstanceId": "paper-default",
+            "shadowInstanceIds": [],
+            "currentPresetId": "paper-default-active-v1",
+            "status": "paused",
+        }
+
+        with patch.object(server, "read_family_registry", return_value={"families": [family]}), patch.object(
+            server, "read_instance", return_value={"id": "paper-default", "name": "Paper Default", "type": "paper"}
+        ), patch.object(server, "read_trading_settings", return_value={"evolutionLab": _lab_settings()}), patch.object(
+            server, "_latest_reports", return_value=[]
+        ), patch.object(
+            runtime, "start_evolution", return_value=True
+        ) as start_evolution:
             runtime._maybe_start_scheduled_evolution()
 
         start_evolution.assert_not_called()

@@ -26,6 +26,7 @@ class EvolutionRunnerStateTests(unittest.TestCase):
             "name": "Paper Default Evolution Line",
             "activeInstanceId": "paper-default",
             "shadowInstanceIds": [],
+            "status": "paused",
             "currentPresetId": "paper-default-active-v1",
         }
         active_card = {
@@ -55,9 +56,13 @@ class EvolutionRunnerStateTests(unittest.TestCase):
 
         row = payload["families"][0]
         self.assertIn("evolutionRunner", row)
+        self.assertEqual(row["status"], "paused")
         self.assertTrue(row["evolutionRunner"]["running"])
         self.assertEqual(row["evolutionRunner"]["lastReason"], "scheduled")
         self.assertEqual(row["evolutionRunner"]["lastResult"]["candidatePresetId"], "paper-default-candidate-v3")
+        self.assertFalse(row["familyActions"]["canPause"])
+        self.assertTrue(row["familyActions"]["canResume"])
+        self.assertTrue(row["familyActions"]["canArchive"])
 
     def test_run_evolution_job_records_last_result_summary(self) -> None:
         from backend import server

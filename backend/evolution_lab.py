@@ -266,6 +266,33 @@ def compare_active_and_shadow(
         promotable = False
         reasons.append("shadow did not outperform active")
 
+    active_scorecard = active_review.get("scorecard") if isinstance(active_review.get("scorecard"), dict) else {}
+    shadow_scorecard = shadow_review.get("scorecard") if isinstance(shadow_review.get("scorecard"), dict) else {}
+    component_delta = {
+        "realizedPnl": round((num(shadow_scorecard.get("realizedPnl")) or 0.0) - (num(active_scorecard.get("realizedPnl")) or 0.0), 2),
+        "expectancy": round((num(shadow_scorecard.get("expectancy")) or 0.0) - (num(active_scorecard.get("expectancy")) or 0.0), 2),
+        "maxDrawdownPct": round((num(active_scorecard.get("maxDrawdownPct")) or 0.0) - (num(shadow_scorecard.get("maxDrawdownPct")) or 0.0), 2),
+        "disciplinePenalty": round((num(active_scorecard.get("disciplinePenalty")) or 0.0) - (num(shadow_scorecard.get("disciplinePenalty")) or 0.0), 2),
+        "lowConfidencePenalty": round((num(active_scorecard.get("lowConfidencePenalty")) or 0.0) - (num(shadow_scorecard.get("lowConfidencePenalty")) or 0.0), 2),
+    }
+    labels = {
+        "realizedPnl": "realizedPnl",
+        "expectancy": "expectancy",
+        "maxDrawdownPct": "drawdown",
+        "disciplinePenalty": "discipline",
+        "lowConfidencePenalty": "confidence",
+    }
+    highlights = [
+        f"{labels[key]} {value:+.2f}"
+        for key, value in sorted(component_delta.items(), key=lambda item: item[1], reverse=True)
+        if value > 0
+    ][:3]
+    drags = [
+        f"{labels[key]} {value:+.2f}"
+        for key, value in sorted(component_delta.items(), key=lambda item: item[1])
+        if value < 0
+    ][:3]
+
     winner = "shadow" if promotable else "active"
     return {
         "activeReviewId": str(active_review.get("id") or "").strip() or None,
@@ -279,6 +306,9 @@ def compare_active_and_shadow(
         "promotable": promotable,
         "winner": winner,
         "reasons": reasons,
+        "componentDelta": component_delta,
+        "highlights": highlights,
+        "drags": drags,
     }
 
 
