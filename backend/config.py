@@ -788,9 +788,9 @@ def _prompt_preset_signature(payload: dict[str, Any]) -> str:
 
 
 def read_prompt_library(instance_id: str | None = None) -> dict[str, Any]:
-    payload = _with_default_file(PROMPT_LIBRARY_PATH, DEFAULT_PROMPT_LIBRARY_SETTINGS)
+    payload = _with_default_file(_instance_path(instance_id, "prompt_library", PROMPT_LIBRARY_PATH), DEFAULT_PROMPT_LIBRARY_SETTINGS)
     raw_prompts: list[Any] = list(payload.get("prompts") if isinstance(payload.get("prompts"), list) else [])
-    try:
+    if instance_id is None:
         from .instances import instance_paths, list_instances
 
         for instance in list_instances():
@@ -799,8 +799,6 @@ def read_prompt_library(instance_id: str | None = None) -> dict[str, Any]:
                 continue
             extra_prompts = extra_payload.get("prompts") if isinstance(extra_payload.get("prompts"), list) else []
             raw_prompts.extend(extra_prompts)
-    except Exception:
-        pass
     prompts: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for index, item in enumerate(raw_prompts):
@@ -828,12 +826,12 @@ def _write_prompt_library_payload(prompts: list[dict[str, Any]], instance_id: st
         "updated": current_run_date(),
         "prompts": prompts,
     }
-    write_json(PROMPT_LIBRARY_PATH, payload)
-    return read_prompt_library()
+    write_json(_instance_path(instance_id, "prompt_library", PROMPT_LIBRARY_PATH), payload)
+    return read_prompt_library(instance_id)
 
 
 def save_prompt_preset(payload: dict[str, Any], instance_id: str | None = None) -> dict[str, Any]:
-    library = read_prompt_library()
+    library = read_prompt_library(instance_id)
     prompts = list(library["prompts"])
     requested_id = str(payload.get("id") or payload.get("presetId") or "").strip()
     requested_name = _prompt_preset_name(payload.get("name"), DEFAULT_PROMPT_SETTINGS["name"])
@@ -888,7 +886,7 @@ def save_prompt_preset(payload: dict[str, Any], instance_id: str | None = None) 
             suffix += 1
         preset = _normalized_prompt_preset(payload, preset_id=candidate_id)
         prompts.append(preset)
-    library = _write_prompt_library_payload(prompts)
+    library = _write_prompt_library_payload(prompts, instance_id)
     saved = next((item for item in library["prompts"] if item["id"] == preset["id"]), preset)
     return {
         "preset": saved,
@@ -900,7 +898,7 @@ def read_prompt_preset(preset_id: str, instance_id: str | None = None) -> dict[s
     target = str(preset_id or "").strip()
     if not target:
         raise ValueError("Prompt preset id is required.")
-    library = read_prompt_library()
+    library = read_prompt_library(instance_id)
     preset = next((item for item in library["prompts"] if item["id"] == target), None)
     if not preset:
         raise ValueError(f"Prompt preset not found: {target}")
@@ -908,7 +906,7 @@ def read_prompt_preset(preset_id: str, instance_id: str | None = None) -> dict[s
 
 
 def rename_prompt_preset(preset_id: str, name: str, instance_id: str | None = None) -> dict[str, Any]:
-    library = read_prompt_library()
+    library = read_prompt_library(instance_id)
     prompts = list(library["prompts"])
     target = str(preset_id or "").strip()
     if not target:
@@ -927,7 +925,7 @@ def rename_prompt_preset(preset_id: str, name: str, instance_id: str | None = No
         break
     if updated_preset is None:
         raise ValueError(f"Prompt preset not found: {target}")
-    library = _write_prompt_library_payload(prompts)
+    library = _write_prompt_library_payload(prompts, instance_id)
     saved = next((item for item in library["prompts"] if item["id"] == target), updated_preset)
     return {
         "preset": saved,
@@ -936,7 +934,7 @@ def rename_prompt_preset(preset_id: str, name: str, instance_id: str | None = No
 
 
 def delete_prompt_preset(preset_id: str, instance_id: str | None = None) -> dict[str, Any]:
-    library = read_prompt_library()
+    library = read_prompt_library(instance_id)
     prompts = list(library["prompts"])
     target = str(preset_id or "").strip()
     if not target:
@@ -944,7 +942,7 @@ def delete_prompt_preset(preset_id: str, instance_id: str | None = None) -> dict
     remaining = [item for item in prompts if item["id"] != target]
     if len(remaining) == len(prompts):
         raise ValueError(f"Prompt preset not found: {target}")
-    library = _write_prompt_library_payload(remaining)
+    library = _write_prompt_library_payload(remaining, instance_id)
     return {
         "deletedId": target,
         "prompts": library["prompts"],

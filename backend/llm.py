@@ -168,11 +168,28 @@ def _openai_messages(prompt_text: str) -> list[dict[str, str]]:
     ]
 
 
-def _anthropic_message(prompt_text: str) -> tuple[str, list[dict[str, Any]]]:
-    system = (
+def _default_json_system_prompt() -> str:
+    return (
         "You are a disciplined crypto futures trading assistant. "
         "Return strict JSON only. Do not include markdown fences."
     )
+
+
+def _openai_messages_with_system(prompt_text: str, system_prompt: str) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": system_prompt,
+        },
+        {
+            "role": "user",
+            "content": prompt_text,
+        },
+    ]
+
+
+def _anthropic_message(prompt_text: str, system_prompt: str | None = None) -> tuple[str, list[dict[str, Any]]]:
+    system = system_prompt or _default_json_system_prompt()
     messages = [
         {
             "role": "user",
@@ -216,12 +233,14 @@ def _request_provider_text(
     provider: dict[str, Any],
     request_api_style: str,
     network_settings: dict[str, Any],
+    *,
+    system_prompt: str | None = None,
 ) -> dict[str, Any]:
     headers = dict(provider.get("customHeaders") or {})
     timeout_seconds = int(provider.get("timeoutSeconds") or 45)
     api_base_url = _normalized_api_base_url(provider.get("baseUrl") or "", request_api_style)
     if request_api_style == "anthropic":
-        system, messages = _anthropic_message(prompt_text)
+        system, messages = _anthropic_message(prompt_text, system_prompt)
         url = _join_endpoint(api_base_url, "/messages")
         headers.update(
             {
@@ -265,7 +284,7 @@ def _request_provider_text(
         )
         payload = {
             "model": provider["model"],
-            "messages": _openai_messages(prompt_text),
+            "messages": _openai_messages_with_system(prompt_text, system_prompt or _default_json_system_prompt()),
             "temperature": provider["temperature"],
             "max_tokens": provider["maxOutputTokens"],
         }
@@ -370,4 +389,51 @@ def generate_trading_decision(
         "rawResponse": selected_result["rawResponse"],
         "rawText": selected_result["rawText"],
         "parsed": parsed,
+    }
+
+
+def generate_structured_json(
+    prompt_text: str,
+    provider: dict[str, Any] | None = None,
+    network_settings: dict[str, Any] | None = None,
+    *,
+    system_prompt: str | None = None,
+) -> dict[str, Any]:
+    provider = provider or read_llm_provider()
+    issues = provider_issues(provider)
+    if issues:
+        raise ValueError(" ".join(issues))
+    effective_network_settings = _provider_network_settings(provider, network_settings or read_network_settings())
+    last_error: Exception | None = None
+    selected_result: dict[str, Any] | None = None
+    for request_api_style in _provider_transport_candidates(provider):
+        try:
+            selected_result = _request_provider_text(
+                prompt_text,
+                provider,
+                request_api_style,
+                effective_network_settings,
+                system_prompt=system_prompt,
+            )
+            break
+        except (HttpRequestError, ValueError) as error:
+            last_error = error
+            continue
+    if selected_result is None:
+        if last_error:
+            raise last_error
+        raise HttpRequestError("模型请求失败，未获得可用响应。")
+    return {
+        "provider": {
+            "preset": provider.get("preset"),
+            "apiStyle": provider.get("apiStyle"),
+            "model": provider.get("model"),
+            "baseUrl": provider.get("baseUrl"),
+            "bypassProxy": provider.get("bypassProxy") is True,
+            "resolvedApiStyle": selected_result["resolvedApiStyle"],
+            "requestUrl": selected_result["requestUrl"],
+        },
+        "rawResponse": selected_result["rawResponse"],
+        "rawText": selected_result["rawText"],
+        "parsed": parse_json_loose(selected_result["rawText"]),
     }
