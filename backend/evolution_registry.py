@@ -195,11 +195,24 @@ def record_promotion(
     reason: str,
     score_delta: float | None = None,
     auto: bool = False,
+    current_preset_id: str | None = None,
 ) -> dict[str, Any]:
     registry = read_family_registry()
     index = _family_index(registry["families"], family_id)
     family = dict(registry["families"][index])
-    family["activeInstanceId"] = str(to_instance_id or "").strip()
+    next_active_id = str(to_instance_id or "").strip()
+    previous_active_id = str(family.get("activeInstanceId") or from_instance_id or "").strip()
+    shadow_ids = [
+        str(item or "").strip()
+        for item in family.get("shadowInstanceIds", [])
+        if str(item or "").strip() and str(item or "").strip() != next_active_id
+    ]
+    if previous_active_id and previous_active_id != next_active_id and previous_active_id not in shadow_ids:
+        shadow_ids.append(previous_active_id)
+    family["activeInstanceId"] = next_active_id
+    family["shadowInstanceIds"] = shadow_ids
+    if current_preset_id is not None:
+        family["currentPresetId"] = str(current_preset_id or "").strip() or None
     family["updatedAt"] = now_iso()
     registry["families"][index] = _normalize_family(family)
     write_family_registry(registry)

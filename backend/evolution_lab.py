@@ -12,9 +12,10 @@ from .config import (
     write_prompt_settings,
     write_trading_settings,
 )
-from .evolution_registry import attach_shadow_instance, family_for_instance
+from .evolution_registry import attach_shadow_instance, family_for_instance, read_family_registry, record_promotion
 from .instances import clone_instance, read_instance
 from .llm import generate_structured_json
+from .utils import num
 
 
 CANDIDATE_SYSTEM_PROMPT = (
@@ -226,3 +227,94 @@ def create_shadow_instance_from_candidate(
         "preset": preset,
         "familyId": target_family_id,
     }
+
+
+def compare_active_and_shadow(
+    *,
+    active_review: dict[str, Any],
+    shadow_review: dict[str, Any],
+    required_score_delta: float = 3.0,
+    min_shadow_decisions: int | None = None,
+    min_shadow_closed_trades: int | None = None,
+) -> dict[str, Any]:
+    active_score = round(num(active_review.get("finalScore")) or 0.0, 2)
+    shadow_score = round(num(shadow_review.get("finalScore")) or 0.0, 2)
+    score_delta = round(shadow_score - active_score, 2)
+
+    shadow_sample = shadow_review.get("sample") if isinstance(shadow_review.get("sample"), dict) else {}
+    shadow_decisions = int(num(shadow_sample.get("decisions")) or num(shadow_review.get("decisions")) or 0)
+    shadow_closed_trades = int(num(shadow_sample.get("closedTrades")) or num(shadow_review.get("closedTrades")) or 0)
+
+    reasons: list[str] = []
+    promotable = True
+    if bool(active_review.get("insufficientSample")):
+        reasons.append("active review sample is insufficient")
+    if bool(shadow_review.get("insufficientSample")):
+        promotable = False
+        reasons.append("shadow review sample is insufficient")
+    if min_shadow_decisions is not None and shadow_decisions < int(min_shadow_decisions):
+        promotable = False
+        reasons.append("shadow decisions below promotion gate")
+    if min_shadow_closed_trades is not None and shadow_closed_trades < int(min_shadow_closed_trades):
+        promotable = False
+        reasons.append("shadow closed trades below promotion gate")
+    if score_delta < float(required_score_delta):
+        promotable = False
+        reasons.append("shadow score delta below threshold")
+    if shadow_score <= active_score:
+        promotable = False
+        reasons.append("shadow did not outperform active")
+
+    winner = "shadow" if promotable else "active"
+    return {
+        "activeReviewId": str(active_review.get("id") or "").strip() or None,
+        "shadowReviewId": str(shadow_review.get("id") or "").strip() or None,
+        "activeInstanceId": str(active_review.get("instanceId") or "").strip() or None,
+        "shadowInstanceId": str(shadow_review.get("instanceId") or "").strip() or None,
+        "activeScore": active_score,
+        "shadowScore": shadow_score,
+        "scoreDelta": score_delta,
+        "requiredScoreDelta": float(required_score_delta),
+        "promotable": promotable,
+        "winner": winner,
+        "reasons": reasons,
+    }
+
+
+def promote_shadow_to_active(
+    *,
+    family_id: str,
+    shadow_instance_id: str,
+    reason: str,
+    score_delta: float | None = None,
+    auto: bool = False,
+) -> dict[str, Any]:
+    target_family_id = str(family_id or "").strip()
+    shadow_id = str(shadow_instance_id or "").strip()
+    if not target_family_id or not shadow_id:
+        raise ValueError("Family id and shadow instance id are required.")
+
+    registry = read_family_registry()
+    family = next((item for item in registry.get("families", []) if item.get("id") == target_family_id), None)
+    if not isinstance(family, dict):
+        raise ValueError(f"Family not found: {target_family_id}")
+    active_instance = read_instance(str(family.get("activeInstanceId") or "").strip())
+    shadow_instance = read_instance(shadow_id)
+    if auto and (active_instance["type"] == "live" or shadow_instance["type"] == "live"):
+        raise ValueError("Automatic promotion to live is not allowed in phase one.")
+    shadow_ids = family.get("shadowInstanceIds") if isinstance(family.get("shadowInstanceIds"), list) else []
+    if shadow_id not in shadow_ids:
+        raise ValueError("Target instance is not registered as a shadow instance for this family.")
+    if active_instance["type"] != "paper" or shadow_instance["type"] != "paper":
+        raise ValueError("Phase-one promotion only supports paper families.")
+
+    shadow_prompt = read_prompt_settings(shadow_id)
+    return record_promotion(
+        family_id=target_family_id,
+        from_instance_id=active_instance["id"],
+        to_instance_id=shadow_id,
+        reason=reason,
+        score_delta=score_delta,
+        auto=auto,
+        current_preset_id=shadow_prompt.get("presetId"),
+    )
