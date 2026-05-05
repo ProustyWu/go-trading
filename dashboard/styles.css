@@ -2674,6 +2674,28 @@ html[data-theme="light"] .short-tag {
   gap: 12px;
 }
 
+.evolution-instance-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.evolution-overview-strip {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.evolution-family-panel {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.evolution-badge-row {
+  justify-items: start;
+}
+
+.evolution-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
 .learning-overview-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -3703,9 +3725,26 @@ html[data-theme="light"] .short-tag {
   background: color-mix(in srgb, var(--panel) 82%, transparent);
 }
 
+.family-shadow-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
 .family-shadow-item span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.family-shadow-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.family-shadow-actions button {
+  min-height: 32px;
 }
 
 @media (max-width: 1320px) {

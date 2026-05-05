@@ -332,8 +332,14 @@ function renderEvolution() {
           ${shadows.length
             ? shadows.map((shadow) => `
               <article class="family-shadow-item">
-                <strong>${escapeHtml(shadow.name)}</strong>
-                <span>${escapeHtml(shadow.id)}</span>
+                <div class="family-shadow-copy">
+                  <strong>${escapeHtml(shadow.name)}</strong>
+                  <span>${escapeHtml(shadow.id)}</span>
+                </div>
+                <div class="family-shadow-actions">
+                  <button type="button" class="secondary-button" data-shadow-view="${escapeHtml(shadow.id)}">查看</button>
+                  <button type="button" class="secondary-button danger-outline" data-shadow-retire="${escapeHtml(shadow.id)}" data-family-id="${escapeHtml(family.id)}">Retire</button>
+                </div>
               </article>
             `).join("")
             : `<p class="empty">暂无 shadow instance。</p>`}
@@ -479,6 +485,17 @@ async function handlePromote(familyId, preferredShadowId = "") {
   await loadWorkbench();
 }
 
+async function handleRetireShadow(familyId, shadowInstanceId) {
+  const family = (state.evolution?.families || []).find((item) => item.id === familyId);
+  const shadow = (family?.shadowInstances || []).find((item) => item.id === shadowInstanceId);
+  const shadowName = shadow?.name || shadowInstanceId;
+  if (!window.confirm(`确认退役 shadow「${shadowName}」？\n这会将它从 family 中移除，并删除本地实例数据。`)) return;
+  await postJson(`/api/instances/${encodeURIComponent(shadowInstanceId)}/retire-shadow`, {
+    reason: "manual_workbench_shadow_retire"
+  });
+  await loadWorkbench();
+}
+
 els.createPaperBtn?.addEventListener("click", () => handleCreate("paper"));
 els.createLiveBtn?.addEventListener("click", () => handleCreate("live"));
 els.createFamilyBtn?.addEventListener("click", () => void handleCreateFamily());
@@ -517,6 +534,16 @@ els.instanceGrid?.addEventListener("click", (event) => {
 els.familyGrid?.addEventListener("click", (event) => {
   const target = event.target;
   if (!(target instanceof HTMLElement)) return;
+  const shadowViewId = target.dataset.shadowView;
+  if (shadowViewId) {
+    window.location.href = `/trader.html?instance=${encodeURIComponent(shadowViewId)}`;
+    return;
+  }
+  const shadowRetireId = target.dataset.shadowRetire;
+  if (shadowRetireId) {
+    void handleRetireShadow(target.dataset.familyId || "", shadowRetireId);
+    return;
+  }
   const cycleFamilyId = target.dataset.familyCycle;
   if (cycleFamilyId) {
     void handleRunCycle(cycleFamilyId);

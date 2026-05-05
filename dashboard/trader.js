@@ -173,6 +173,7 @@ const state = {
   network: null,
   networkIp: null,
   liveConfig: null,
+  evolution: null,
   logs: null,
   clientErrors: [],
   autoRefreshTimer: null,
@@ -246,6 +247,9 @@ const els = {
   candidateList: document.querySelector("#candidateList"),
   learningMeta: document.querySelector("#learningMeta"),
   learningPanel: document.querySelector("#learningPanel"),
+  evolutionMeta: document.querySelector("#evolutionMeta"),
+  evolutionPanel: document.querySelector("#evolutionPanel"),
+  evolutionFeedback: document.querySelector("#evolutionFeedback"),
   decisionMeta: document.querySelector("#decisionMeta"),
   decisionLog: document.querySelector("#decisionLog"),
   tradingSettingsForm: document.querySelector("#tradingSettingsForm"),
@@ -452,6 +456,12 @@ function fmtDurationSeconds(value) {
   return `${minutes} 分 ${rest} 秒`;
 }
 
+function fmtScore(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "n/a";
+  return num.toFixed(2);
+}
+
 function exchangeCooldownText(cooldown) {
   if (!cooldown || !cooldown.active) return "";
   const exchange = String(cooldown.exchange || "binance").toUpperCase();
@@ -465,6 +475,36 @@ function renderExchangeCooldownNotice(cooldown) {
   if (!text) return "";
   const reason = cooldown.reason ? ` · ${cooldown.reason}` : "";
   return `<div class="exchange-cooldown-banner"><strong>${escapeHtml(text)}</strong><span>${escapeHtml(reason)}</span></div>`;
+}
+
+function evolutionRunnerState(runner) {
+  if (runner?.running) return { label: "Cycle Running", className: "is-running" };
+  if (runner?.lastError) return { label: "Cycle Error", className: "is-error" };
+  if (runner?.lastFinishedAt) return { label: "Cycle Ready", className: "is-ready" };
+  return { label: "Cycle Idle", className: "is-idle" };
+}
+
+function describeEvolutionResult(runner) {
+  const result = runner?.lastResult;
+  if (!result) {
+    if (runner?.lastError) return "最近一轮执行失败";
+    return runner?.lastFinishedAt ? "最近一轮未生成摘要" : "尚未执行过 cycle";
+  }
+  const parts = [];
+  if (Number.isFinite(Number(result.familyScore))) parts.push(`family ${fmtScore(result.familyScore)}`);
+  if (result.insufficientSample) parts.push("样本不足");
+  if (result.candidatePresetId) parts.push(`candidate ${result.candidatePresetId}`);
+  if (result.promotionInstanceId) parts.push(`promote ${result.promotionInstanceId}`);
+  return parts.join(" · ") || "最近一轮已完成";
+}
+
+function describeEvolutionRunnerMeta(runner) {
+  const parts = [];
+  if (runner?.lastReason) parts.push(`reason ${runner.lastReason}`);
+  if (runner?.lastStartedAt) parts.push(`start ${fmtDateTime(runner.lastStartedAt)}`);
+  if (runner?.lastFinishedAt) parts.push(`finish ${fmtDateTime(runner.lastFinishedAt)}`);
+  if (Number.isFinite(Number(runner?.lastDurationSeconds))) parts.push(`耗时 ${fmtDurationSeconds(runner.lastDurationSeconds)}`);
+  return parts.join(" · ") || "尚无运行记录";
 }
 
 function parseSortTime(value) {
@@ -632,7 +672,7 @@ function applyTheme(theme) {
 }
 
 function setActiveTab(tab) {
-  const nextTab = ["trade", "learning", "prompt", "universe", "log"].includes(tab) ? tab : "trade";
+  const nextTab = ["trade", "learning", "evolution", "prompt", "universe", "log"].includes(tab) ? tab : "trade";
   state.activeTab = nextTab;
   writeStoredValue(TAB_STORAGE_KEY, nextTab);
   els.tabButtons.forEach((button) => {
@@ -2171,6 +2211,117 @@ function decisionMetric(label, value, extraClass = "") {
   `;
 }
 
+function renderEvolution() {
+  if (!els.evolutionMeta || !els.evolutionPanel || !els.evolutionFeedback) return;
+  const evolution = state.evolution || {};
+  const family = evolution.family;
+  if (!family) {
+    els.evolutionMeta.textContent = "当前实例还未加入 strategy family。";
+    els.evolutionPanel.innerHTML = `
+      <div class="universe-help-block">
+        <p>这个实例当前不属于任何 evolution line。</p>
+        <p>如果你希望纳入自进化闭环，请回到工作台，把某个 paper active instance 建成 family，或从 active 生成 shadow。</p>
+      </div>
+    `;
+    els.evolutionFeedback.textContent = "未绑定 family，当前无可执行的 evolution 操作。";
+    return;
+  }
+
+  const role = evolution.role || "unbound";
+  const runner = evolution.evolutionRunner || {};
+  const runnerState = evolutionRunnerState(runner);
+  const actions = evolution.actions || {};
+  const active = evolution.activeInstance;
+  const shadows = evolution.shadowInstances || [];
+  const latestFamilyReview = evolution.latestFamilyReview;
+  const latestInstanceReview = evolution.latestInstanceReview;
+  const latestCandidate = evolution.latestCandidate;
+  const preview = evolution.promotionPreview;
+  const lastPromotion = evolution.lastPromotion;
+  const busy = Boolean(runner.running);
+  const roleLabel = role === "active" ? "Active" : "Shadow";
+
+  els.evolutionMeta.textContent = `${family.name} · ${roleLabel} · Runner ${runnerState.label}`;
+  els.evolutionPanel.innerHTML = `
+    <div class="overview-strip evolution-overview-strip">
+      <div class="overview-pill">
+        <span>Role</span>
+        <strong>${escapeHtml(roleLabel)}</strong>
+      </div>
+      <div class="overview-pill">
+        <span>Family Review</span>
+        <strong>${escapeHtml(fmtScore(latestFamilyReview?.finalScore))}</strong>
+      </div>
+      <div class="overview-pill">
+        <span>Instance Review</span>
+        <strong>${escapeHtml(fmtScore(latestInstanceReview?.finalScore))}</strong>
+      </div>
+      <div class="overview-pill">
+        <span>Shadows</span>
+        <strong>${escapeHtml(String(shadows.length))}</strong>
+      </div>
+      <div class="overview-pill">
+        <span>Candidate</span>
+        <strong>${escapeHtml(latestCandidate?.presetId || "n/a")}</strong>
+      </div>
+      <div class="overview-pill">
+        <span>Promotion</span>
+        <strong>${escapeHtml(preview ? fmtScore(preview.scoreDelta) : "n/a")}</strong>
+      </div>
+    </div>
+    <div class="family-panel evolution-family-panel">
+      <div>
+        <p class="family-label">Family</p>
+        <strong>${escapeHtml(family.id)}</strong>
+        <p class="meta">Active ${escapeHtml(active?.name || family.activeInstanceId || "n/a")} · 当前 preset ${escapeHtml(family.currentPresetId || "n/a")}</p>
+      </div>
+      <div>
+        <p class="family-label">Runner</p>
+        <div class="family-badge-row evolution-badge-row">
+          <div class="family-badge ${runnerState.className}">${escapeHtml(runnerState.label)}</div>
+        </div>
+        <p class="meta">${escapeHtml(describeEvolutionResult(runner))}</p>
+        <p class="meta">${escapeHtml(describeEvolutionRunnerMeta(runner))}</p>
+      </div>
+      <div>
+        <p class="family-label">Promotion Preview</p>
+        <strong>${escapeHtml(preview ? `${fmtScore(preview.shadowScore)} vs ${fmtScore(preview.activeScore)}` : "暂无可比较结果")}</strong>
+        <p class="meta">${escapeHtml(preview ? `delta ${fmtScore(preview.scoreDelta)} / threshold ${fmtScore(preview.requiredScoreDelta)}` : "当前实例还没有可用的晋升比较")}</p>
+      </div>
+      <div>
+        <p class="family-label">Last Promotion</p>
+        <strong>${escapeHtml(lastPromotion?.toInstanceId || "暂无")}</strong>
+        <p class="meta">${escapeHtml(lastPromotion ? fmtDateTime(lastPromotion.approvedAt) : "当前 family 还没有晋升记录")}</p>
+      </div>
+    </div>
+    <div class="family-shadow-list">
+      ${shadows.length
+        ? shadows.map((shadow) => `
+          <article class="family-shadow-item">
+            <div class="family-shadow-copy">
+              <strong>${escapeHtml(shadow.name)}</strong>
+              <span>${escapeHtml(shadow.id)}</span>
+            </div>
+            <div class="family-shadow-actions">
+              <button type="button" class="secondary-button" data-evolution-view-shadow="${escapeHtml(shadow.id)}">查看</button>
+            </div>
+          </article>
+        `).join("")
+        : `<p class="empty">当前 family 还没有 shadow instance。</p>`}
+    </div>
+    <div class="settings-actions evolution-actions">
+      <button type="button" data-evolution-cycle="${escapeHtml(family.id)}" ${actions.canRunCycle && !busy ? "" : "disabled"}>${escapeHtml(busy ? "Cycle Running" : "Run Cycle")}</button>
+      <button type="button" class="secondary-button" data-evolution-review="${escapeHtml(family.id)}" ${actions.canRunReview && !busy ? "" : "disabled"}>Run Review</button>
+      <button type="button" class="secondary-button" data-evolution-candidate="${escapeHtml(family.id)}" ${actions.canCreateCandidate && !busy ? "" : "disabled"}>Create Candidate</button>
+      <button type="button" class="secondary-button" data-evolution-promote="${escapeHtml(family.id)}" ${actions.canPromoteShadow && !busy ? "" : "disabled"}>Promote Shadow</button>
+      <button type="button" class="secondary-button danger-outline" data-evolution-retire="${escapeHtml(state.instance?.id || "")}" ${actions.canRetireShadow && !busy ? "" : "disabled"}>Retire Shadow</button>
+    </div>
+  `;
+  els.evolutionFeedback.textContent = runner.lastError
+    ? `最近一轮异常：${runner.lastError}`
+    : "可以在这里直接执行 family 级 cycle/review，或对当前 shadow 做 promote/retire。";
+}
+
 function renderPositionActionCard(action) {
   const symbol = String(action?.symbol || "n/a").toUpperCase();
   const decision = String(action?.decision || "hold").trim().toLowerCase() || "hold";
@@ -2557,6 +2708,7 @@ function renderAll() {
   renderClosedPositions();
   renderCandidates();
   renderLearning();
+  renderEvolution();
   renderDecisionLog();
   renderPromptTest();
   renderPromptLibrary();
@@ -2599,6 +2751,7 @@ async function loadData() {
     state.tradingState = tradingState;
     state.instance = tradingState.instance || state.instance;
     state.viewMode = state.instance?.type === "live" ? "live" : "paper";
+    state.evolution = tradingState.evolution || null;
     state.tradingSettings = tradingSettings;
     state.provider = provider;
     state.prompt = prompt;
@@ -2676,6 +2829,85 @@ async function handleRunScan() {
     window.setTimeout(loadData, 1200);
   } catch (error) {
     els.settingsFeedback.textContent = `候选池刷新失败：${error.message}`;
+  }
+}
+
+async function handleRunEvolutionCycle() {
+  const familyId = state.evolution?.family?.id;
+  if (!familyId) return;
+  els.evolutionFeedback.textContent = "正在触发 evolution cycle…";
+  try {
+    const result = await postJson("/api/evolution/cycle/start", { familyId, reason: "manual_detail_cycle" });
+    els.evolutionFeedback.textContent = result.started
+      ? "已触发 evolution cycle。"
+      : "上一轮 evolution cycle 仍在运行中。";
+    window.setTimeout(loadData, result.started ? 800 : 300);
+  } catch (error) {
+    els.evolutionFeedback.textContent = `触发 cycle 失败：${error.message}`;
+  }
+}
+
+async function handleRunEvolutionReview() {
+  const familyId = state.evolution?.family?.id;
+  if (!familyId) return;
+  els.evolutionFeedback.textContent = "正在执行 family review…";
+  try {
+    const payload = await postJson("/api/evolution/review/run", { familyId });
+    const preview = payload.promotionPreview;
+    els.evolutionFeedback.textContent = `Review 完成：family ${fmtScore(payload.familyReview?.finalScore)} / delta ${fmtScore(preview?.scoreDelta)}`;
+    await loadData();
+  } catch (error) {
+    els.evolutionFeedback.textContent = `执行 review 失败：${error.message}`;
+  }
+}
+
+async function handleCreateEvolutionCandidate() {
+  const familyId = state.evolution?.family?.id;
+  if (!familyId) return;
+  els.evolutionFeedback.textContent = "正在生成 candidate…";
+  try {
+    const payload = await postJson("/api/evolution/candidate/create", { familyId, createShadow: true });
+    const presetId = payload.candidate?.preset?.id || "n/a";
+    const shadowId = payload.shadow?.instance?.id || "未创建";
+    els.evolutionFeedback.textContent = `Candidate 已生成：${presetId} · Shadow ${shadowId}`;
+    await loadData();
+  } catch (error) {
+    els.evolutionFeedback.textContent = `生成 candidate 失败：${error.message}`;
+  }
+}
+
+async function handlePromoteCurrentShadow() {
+  const familyId = state.evolution?.family?.id;
+  const shadowInstanceId = state.instance?.id;
+  const preview = state.evolution?.promotionPreview;
+  if (!familyId || !shadowInstanceId) return;
+  if (!window.confirm(`确认将当前 shadow「${state.instance?.name || shadowInstanceId}」晋升为 active？`)) return;
+  els.evolutionFeedback.textContent = "正在执行 shadow promotion…";
+  try {
+    await postJson("/api/evolution/promote", {
+      familyId,
+      shadowInstanceId,
+      reason: "manual_detail_shadow_promote",
+      scoreDelta: preview?.shadowInstanceId === shadowInstanceId ? preview?.scoreDelta : undefined,
+      auto: false
+    });
+    els.evolutionFeedback.textContent = "Shadow promotion 已完成。";
+    await loadData();
+  } catch (error) {
+    els.evolutionFeedback.textContent = `晋升失败：${error.message}`;
+  }
+}
+
+async function handleRetireCurrentShadow() {
+  const shadowInstanceId = state.instance?.id;
+  if (!shadowInstanceId) return;
+  if (!window.confirm(`确认退役当前 shadow「${state.instance?.name || shadowInstanceId}」？\n这会将它从 family 中移除，并删除本地实例数据。`)) return;
+  els.evolutionFeedback.textContent = "正在退役当前 shadow…";
+  try {
+    await postJson(`${INSTANCE_API_BASE}/retire-shadow`, { reason: "manual_detail_shadow_retire" });
+    window.location.href = "/";
+  } catch (error) {
+    els.evolutionFeedback.textContent = `退役失败：${error.message}`;
   }
 }
 
@@ -3271,6 +3503,36 @@ async function handleSaveLiveConfig(event) {
   }
 }
 
+function handleEvolutionPanelClick(event) {
+  const rawTarget = event.target;
+  if (!(rawTarget instanceof HTMLElement)) return;
+  const target = rawTarget.closest("[data-evolution-cycle],[data-evolution-review],[data-evolution-candidate],[data-evolution-promote],[data-evolution-retire],[data-evolution-view-shadow]");
+  if (!(target instanceof HTMLElement)) return;
+  if (target.dataset.evolutionCycle) {
+    void handleRunEvolutionCycle();
+    return;
+  }
+  if (target.dataset.evolutionReview) {
+    void handleRunEvolutionReview();
+    return;
+  }
+  if (target.dataset.evolutionCandidate) {
+    void handleCreateEvolutionCandidate();
+    return;
+  }
+  if (target.dataset.evolutionPromote) {
+    void handlePromoteCurrentShadow();
+    return;
+  }
+  if (target.dataset.evolutionRetire) {
+    void handleRetireCurrentShadow();
+    return;
+  }
+  if (target.dataset.evolutionViewShadow) {
+    window.location.href = `/trader.html?instance=${encodeURIComponent(target.dataset.evolutionViewShadow)}`;
+  }
+}
+
 els.themeToggleBtn.addEventListener("click", handleThemeToggle);
 els.toggleModeBtn.addEventListener("click", handleToggleMode);
 els.cloneLiveBtn.addEventListener("click", handleCloneLive);
@@ -3318,6 +3580,7 @@ els.liveConfigEnabledInput.addEventListener("change", () => handleLiveConfigMode
 els.liveDryRunInput.addEventListener("change", () => handleLiveConfigModeToggle("dryRun"));
 els.liveConfigForm.addEventListener("submit", handleSaveLiveConfig);
 els.saveLiveConfigBtn.addEventListener("click", handleSaveLiveConfig);
+els.evolutionPanel?.addEventListener("click", handleEvolutionPanelClick);
 els.tabButtons.forEach((button) => {
   button.addEventListener("click", () => setActiveTab(button.dataset.tabButton));
 });

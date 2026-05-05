@@ -70,6 +70,58 @@ class EvolutionShadowInstanceTests(unittest.TestCase):
         self.assertIn(shadow_id, family["shadowInstanceIds"])
         self.assertEqual(created["preset"]["id"], saved["preset"]["id"])
 
+    def test_retire_shadow_instance_detaches_family_and_deletes_shadow(self) -> None:
+        from backend import config, evolution_lab, evolution_registry, instances
+
+        candidate_payload = {
+            "name": "paper_default_candidate_v1",
+            "decision_logic": {
+                "role": "You are a patient crypto futures trader.",
+                "core_principles": ["Protect capital first and wait for cleaner pullbacks."],
+                "entry_preferences": ["Prefer continuation setups with stronger confirmation."],
+                "position_management": ["Reduce exposure faster when momentum fades."],
+                "response_style": ["Return strict JSON only."],
+            },
+            "klineFeeds": {
+                "1m": {"enabled": False, "limit": 120},
+                "5m": {"enabled": True, "limit": 80},
+                "15m": {"enabled": True, "limit": 64},
+            },
+        }
+
+        with patch.object(instances, "INSTANCE_ROOT", self.instance_root), patch.object(
+            instances, "INSTANCE_INDEX_PATH", self.index_path
+        ), patch.object(evolution_registry, "FAMILY_REGISTRY_PATH", self.registry_path), patch.object(
+            evolution_registry, "PROMOTION_LOG_PATH", self.promotions_path
+        ):
+            instances.ensure_instances_migrated()
+            evolution_registry.create_family(
+                family_id="family-paper-default",
+                name="Paper Default Evolution Line",
+                active_instance_id="paper-default",
+            )
+            saved = evolution_lab.persist_candidate_preset("paper-default", candidate_payload)
+            created = evolution_lab.create_shadow_instance_from_candidate(
+                active_instance_id="paper-default",
+                family_id="family-paper-default",
+                candidate_preset_id=saved["preset"]["id"],
+            )
+            shadow_id = created["instance"]["id"]
+
+            retired = evolution_lab.retire_shadow_instance(
+                family_id="family-paper-default",
+                shadow_instance_id=shadow_id,
+                reason="cleanup_failed_candidate",
+            )
+            registry = evolution_registry.read_family_registry()
+            instance_ids = [item["id"] for item in instances.list_instances()]
+
+        family = next(item for item in registry["families"] if item["id"] == "family-paper-default")
+        self.assertEqual(retired["retiredInstanceId"], shadow_id)
+        self.assertEqual(retired["familyId"], "family-paper-default")
+        self.assertEqual(family["shadowInstanceIds"], [])
+        self.assertNotIn(shadow_id, instance_ids)
+
 
 if __name__ == "__main__":
     unittest.main()

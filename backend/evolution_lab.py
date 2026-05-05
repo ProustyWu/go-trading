@@ -12,8 +12,8 @@ from .config import (
     write_prompt_settings,
     write_trading_settings,
 )
-from .evolution_registry import attach_shadow_instance, family_for_instance, read_family_registry, record_promotion
-from .instances import clone_instance, read_instance
+from .evolution_registry import attach_shadow_instance, detach_shadow_instance, family_for_instance, read_family_registry, record_promotion
+from .instances import clone_instance, delete_instance, read_instance
 from .llm import generate_structured_json
 from .utils import num
 
@@ -319,3 +319,34 @@ def promote_shadow_to_active(
         auto=auto,
         current_preset_id=shadow_prompt.get("presetId"),
     )
+
+
+def retire_shadow_instance(
+    *,
+    family_id: str,
+    shadow_instance_id: str,
+    reason: str,
+) -> dict[str, Any]:
+    target_family_id = str(family_id or "").strip()
+    shadow_id = str(shadow_instance_id or "").strip()
+    if not target_family_id or not shadow_id:
+        raise ValueError("Family id and shadow instance id are required.")
+
+    registry = read_family_registry()
+    family = next((item for item in registry.get("families", []) if item.get("id") == target_family_id), None)
+    if not isinstance(family, dict):
+        raise ValueError(f"Family not found: {target_family_id}")
+    if str(family.get("activeInstanceId") or "").strip() == shadow_id:
+        raise ValueError("Active family instance cannot be retired as a shadow.")
+    shadow_ids = family.get("shadowInstanceIds") if isinstance(family.get("shadowInstanceIds"), list) else []
+    if shadow_id not in shadow_ids:
+        raise ValueError("Target instance is not registered as a shadow instance for this family.")
+
+    detach_shadow_instance(target_family_id, shadow_id)
+    delete_instance(shadow_id)
+    return {
+        "familyId": target_family_id,
+        "retiredInstanceId": shadow_id,
+        "reason": str(reason or "manual_shadow_retire").strip() or "manual_shadow_retire",
+        "retiredAt": read_family_registry().get("updatedAt"),
+    }

@@ -41,8 +41,9 @@ from .evolution_lab import (
     create_shadow_instance_from_candidate,
     generate_candidate_prompt,
     promote_shadow_to_active,
+    retire_shadow_instance,
 )
-from .evolution_registry import create_family, read_family_registry, read_promotion_log
+from .evolution_registry import create_family, detach_instance_membership, family_for_instance, read_family_registry, read_promotion_log
 from .evolution_review import REVIEWS_DIR, write_review_report
 from .exchange_cooldown import cooldown_status
 from .http_client import HttpRequestError, request_text
@@ -440,6 +441,95 @@ class AppRuntime:
             "updatedAt": now_iso(),
             "families": families_payload,
             "reviews": reports[:50],
+        }
+
+    def evolution_instance_payload(self, instance_id: str) -> dict[str, Any]:
+        target = str(instance_id or "").strip()
+        payload = self.evolution_families_payload()
+        family = next(
+            (
+                item
+                for item in payload.get("families", [])
+                if str(item.get("activeInstanceId") or "").strip() == target
+                or target in [str(value or "").strip() for value in item.get("shadowInstanceIds", [])]
+            ),
+            None,
+        )
+        if not isinstance(family, dict):
+            return {
+                "instanceId": target,
+                "role": "unbound",
+                "family": None,
+                "activeInstance": None,
+                "shadowInstances": [],
+                "latestFamilyReview": None,
+                "latestInstanceReview": None,
+                "latestCandidate": None,
+                "promotionPreview": None,
+                "lastPromotion": None,
+                "evolutionRunner": None,
+                "actions": {
+                    "canRunCycle": False,
+                    "canRunReview": False,
+                    "canCreateCandidate": False,
+                    "canPromoteShadow": False,
+                    "canRetireShadow": False,
+                },
+            }
+
+        role = "active" if str(family.get("activeInstanceId") or "").strip() == target else "shadow"
+        latest_instance_review = family.get("latestActiveReview") if role == "active" else next(
+            (
+                item
+                for item in family.get("latestShadowReviews", [])
+                if str(item.get("instanceId") or "").strip() == target
+            ),
+            None,
+        )
+        preview = family.get("promotionPreview")
+        if (
+            role == "shadow"
+            and (not isinstance(preview, dict) or str(preview.get("shadowInstanceId") or "").strip() != target)
+            and isinstance(family.get("latestActiveReview"), dict)
+            and isinstance(latest_instance_review, dict)
+        ):
+            active_instance_id = str(family.get("activeInstanceId") or "").strip()
+            settings = read_trading_settings(active_instance_id) if active_instance_id else read_trading_settings()
+            shadow_gate = settings.get("evolutionLab", {}).get("shadow", {})
+            preview = compare_active_and_shadow(
+                active_review=family["latestActiveReview"],
+                shadow_review=latest_instance_review,
+                required_score_delta=float(shadow_gate.get("requiredScoreDelta", 3.0) or 3.0),
+                min_shadow_decisions=int(shadow_gate.get("minShadowDecisions", 20) or 20),
+                min_shadow_closed_trades=int(shadow_gate.get("minShadowClosedTrades", 10) or 10),
+            )
+
+        return {
+            "instanceId": target,
+            "role": role,
+            "family": {
+                "id": family.get("id"),
+                "name": family.get("name"),
+                "activeInstanceId": family.get("activeInstanceId"),
+                "shadowInstanceIds": family.get("shadowInstanceIds", []),
+                "currentPresetId": family.get("currentPresetId"),
+                "promotionCount": family.get("promotionCount"),
+            },
+            "activeInstance": family.get("activeInstance"),
+            "shadowInstances": family.get("shadowInstances", []),
+            "latestFamilyReview": family.get("latestFamilyReview"),
+            "latestInstanceReview": latest_instance_review,
+            "latestCandidate": family.get("latestCandidate"),
+            "promotionPreview": preview,
+            "lastPromotion": family.get("lastPromotion"),
+            "evolutionRunner": family.get("evolutionRunner"),
+            "actions": {
+                "canRunCycle": True,
+                "canRunReview": True,
+                "canCreateCandidate": role == "active",
+                "canPromoteShadow": role == "shadow" and bool((preview or {}).get("promotable")),
+                "canRetireShadow": role == "shadow",
+            },
         }
 
     def _run_scan_job(self, instance_id: str, reason: str) -> None:
@@ -1020,14 +1110,52 @@ class TradingAgentHandler(BaseHTTPRequestHandler):
             scan_runner = self.runtime._scan_runner(instance_id)
             if runner["running"] or scan_runner["running"]:
                 raise RuntimeError("正在运行的实例不能删除，请先暂停。")
+            family = family_for_instance(instance_id)
+            detached_family = None
+            if isinstance(family, dict):
+                if str(family.get("activeInstanceId") or "").strip() == str(instance_id or "").strip():
+                    raise RuntimeError("当前实例是 family active，不能直接删除。请先晋升其他 shadow，或回到工作台处理 family。")
+                detached_family = detach_instance_membership(instance_id)
             delete_instance(instance_id)
             self.runtime.record_log("WARN", f"实例已删除，id={instance_id}")
-            return _json_response(self, {"deletedId": instance_id, "instances": self.runtime.instances_payload()["instances"]}) or True
+            return _json_response(
+                self,
+                {
+                    "deletedId": instance_id,
+                    "detachedFamily": detached_family,
+                    "instances": self.runtime.instances_payload()["instances"],
+                    **self.runtime.evolution_families_payload(),
+                },
+            ) or True
+        if method == "POST" and subpath == "/retire-shadow":
+            runner = self.runtime._trade_runner(instance_id)
+            scan_runner = self.runtime._scan_runner(instance_id)
+            if runner["running"] or scan_runner["running"]:
+                raise RuntimeError("正在运行的 shadow 不能退役，请先暂停。")
+            family = family_for_instance(instance_id)
+            if not isinstance(family, dict) or str(family.get("activeInstanceId") or "").strip() == str(instance_id or "").strip():
+                raise RuntimeError("当前实例不是可退役的 shadow。")
+            payload = _read_json_body(self)
+            retired = retire_shadow_instance(
+                family_id=str(family.get("id") or "").strip(),
+                shadow_instance_id=instance_id,
+                reason=str(payload.get("reason") or "manual_shadow_retire"),
+            )
+            self.runtime.record_log("WARN", f"Shadow 已退役，family={retired['familyId']}，instance={instance_id}", instance_id)
+            return _json_response(
+                self,
+                {
+                    "retired": retired,
+                    "instances": self.runtime.instances_payload()["instances"],
+                    **self.runtime.evolution_families_payload(),
+                },
+            ) or True
         if method == "GET" and subpath == "/state":
             payload = summarize_trading_state(instance_id)
             payload["tradeRunner"] = self.runtime._trade_runner(instance_id)
             payload["scanRunner"] = self.runtime._scan_runner(instance_id)
             payload["nextDecisionDueAt"] = self.runtime.next_trade_due_at(instance_id)
+            payload["evolution"] = self.runtime.evolution_instance_payload(instance_id)
             return _json_response(self, payload) or True
         if method == "GET" and subpath == "/logs":
             return _json_response(self, self.runtime.api_logs(instance_id)) or True

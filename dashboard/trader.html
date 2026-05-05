@@ -279,6 +279,7 @@
         <div class="trader-tabs" role="tablist" aria-label="Trader main tabs">
           <button type="button" class="tab-button active" data-tab-button="trade" role="tab" aria-selected="true">交易</button>
           <button type="button" class="tab-button" data-tab-button="learning" role="tab" aria-selected="false">学习</button>
+          <button type="button" class="tab-button" data-tab-button="evolution" role="tab" aria-selected="false">Evolution</button>
           <button type="button" class="tab-button" data-tab-button="prompt" role="tab" aria-selected="false">Prompt</button>
           <button type="button" class="tab-button" data-tab-button="universe" role="tab" aria-selected="false">候选池</button>
           <button type="button" class="tab-button" data-tab-button="log" role="tab" aria-selected="false">Log</button>
@@ -333,6 +334,17 @@
               <p id="learningMeta" class="meta">等待最近决策</p>
             </div>
             <div id="learningPanel" class="learning-panel"></div>
+          </section>
+        </div>
+
+        <div class="trader-tab-panel" data-tab-panel="evolution" hidden>
+          <section class="trader-section">
+            <div class="section-heading">
+              <h2>策略家族</h2>
+              <p id="evolutionMeta" class="meta">读取 evolution 状态中</p>
+            </div>
+            <div id="evolutionPanel" class="evolution-instance-panel"></div>
+            <p id="evolutionFeedback" class="status-line">该面板用于查看 family、shadow 与晋升状态。</p>
           </section>
         </div>
 

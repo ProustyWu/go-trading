@@ -188,6 +188,34 @@ def attach_shadow_instance(family_id: str, shadow_instance_id: str) -> dict[str,
     return registry["families"][index]
 
 
+def detach_shadow_instance(family_id: str, shadow_instance_id: str) -> dict[str, Any]:
+    registry = read_family_registry()
+    index = _family_index(registry["families"], family_id)
+    family = dict(registry["families"][index])
+    shadow_id = str(shadow_instance_id or "").strip()
+    family["shadowInstanceIds"] = [
+        str(item or "").strip()
+        for item in family.get("shadowInstanceIds", [])
+        if str(item or "").strip() and str(item or "").strip() != shadow_id
+    ]
+    family["updatedAt"] = now_iso()
+    registry["families"][index] = _normalize_family(family)
+    write_family_registry(registry)
+    return registry["families"][index]
+
+
+def detach_instance_membership(instance_id: str | None) -> dict[str, Any] | None:
+    target = str(instance_id or "").strip()
+    if not target:
+        return None
+    family = family_for_instance(target)
+    if not isinstance(family, dict):
+        return None
+    if str(family.get("activeInstanceId") or "").strip() == target:
+        raise ValueError("Active family instance cannot be detached directly.")
+    return detach_shadow_instance(str(family.get("id") or "").strip(), target)
+
+
 def record_promotion(
     family_id: str,
     from_instance_id: str,
